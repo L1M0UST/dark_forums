@@ -39,6 +39,7 @@ class Settings:
 
 def load_settings(project_root: Path) -> Settings:
     load_dotenv(project_root / ".env")
+    load_dotenv(project_root / ".env.local", override=True)
 
     base_url = os.getenv("DARKFORUMS_BASE_URL", "").strip()
     leaks_url = os.getenv("DARKFORUMS_LEAKS_URL", "").strip()

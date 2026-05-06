@@ -13,11 +13,22 @@ venv/
 env/
 
 # Local secrets
-.env
+.env.local
 
 # Local runtime artifacts
-data/
-logs/
+data/*
+!data/.gitkeep
+!data/debug/
+!data/posts/
+!data/screenshots/
+data/debug/*
+!data/debug/.gitkeep
+data/posts/*
+!data/posts/.gitkeep
+data/screenshots/*
+!data/screenshots/.gitkeep
+logs/*
+!logs/.gitkeep
 
 # OS / editor
 .DS_Store

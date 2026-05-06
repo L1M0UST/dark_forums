@@ -53,7 +53,13 @@ python -m playwright install chromium
 
 ## Configuration
 
-Copy `.env.example` to `.env` and fill in your own values.
+The repository includes a tracked `.env` file with keys only and no values.
+
+Recommended setup:
+
+- Keep `.env` as the shared template
+- Put your real local secrets in `.env.local`
+- `.env.local` is ignored by Git and overrides `.env` at runtime
 
 Key variables:
 
@@ -70,7 +76,7 @@ Key variables:
 - `DINGTALK_ENABLED` / `DINGTALK_WEBHOOK` / `DINGTALK_SECRET`
 - `FEISHU_ENABLED` / `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `FEISHU_CHAT_ID`
 
-Do not commit your real `.env` file.
+Do not commit real secrets. Use `.env.local` for private values.
 
 ## How To Run
 
@@ -151,9 +157,10 @@ Start in: E:\code\py\dark_forums
 - `latest_page_only` is useful for lightweight hourly polling.
 - `full_site_mode` can generate much larger workloads and disables the usual freshness gating.
 - If Playwright cannot launch in a restricted shell, run it in a normal local shell.
+- Runtime config is loaded from `.env`, then `.env.local` if present.
 
 ## Security
 
-- Rotate any secrets that were ever stored in the current `.env` before publishing this repository.
-- Keep `.env`, SQLite data, screenshots, logs, and browser state out of Git.
+- Rotate any secrets that were ever stored in a tracked config file before publishing this repository.
+- Keep `.env.local`, SQLite data, screenshots, logs, and browser state out of Git.
 - Review the target site's terms, account risk, and local legal constraints before automated use.
