@@ -1,0 +1,37 @@
+{
+  "sqlite": {
+    "db_path": "../data/darkforums.sqlite3",
+    "batch_size": 50,
+    "start_scraped_at": "",
+    "start_url": ""
+  },
+  "qwen": {
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "api_key": "YOUR_QWEN_API_KEY",
+    "model": "qwen-plus",
+    "temperature": 0.2,
+    "timeout_seconds": 120,
+    "max_retries": 3,
+    "retry_backoff_seconds": 2.0,
+    "first_post_text_max_chars": 12000,
+    "first_post_text_min_chars": 1200,
+    "first_post_text_retry_reduction_ratio": 0.6
+  },
+  "clickhouse": {
+    "base_url": "http://127.0.0.1:8123",
+    "user": "default",
+    "password": "",
+    "database": "default",
+    "table": "data_leak_darkforums",
+    "cluster": "clickhouse_cluster",
+    "timeout_seconds": 30,
+    "backfill_missing_only": false
+  },
+  "run": {
+    "dry_run": false,
+    "max_rows": 0,
+    "worker_count": 1,
+    "log_llm_input": false,
+    "log_llm_input_max_chars": 4000
+  }
+}
