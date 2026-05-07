@@ -51,6 +51,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             discovered_at TEXT NOT NULL,
             status TEXT NOT NULL,
             last_error TEXT,
+            failure_count INTEGER NOT NULL DEFAULT 0,
             last_fetched_at TEXT,
             content_path TEXT,
             extracted_at TEXT,
@@ -438,6 +439,8 @@ def _migrate_threads(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE threads ADD COLUMN first_post_text TEXT")
     if "created_at" not in existing:
         conn.execute("ALTER TABLE threads ADD COLUMN created_at TEXT")
+    if "failure_count" not in existing:
+        conn.execute("ALTER TABLE threads ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0")
 
     conn.commit()
 
@@ -500,7 +503,7 @@ def mark_extracted(conn: sqlite3.Connection, thread_url: str, extracted_at: str,
     conn.execute(
         """
         UPDATE threads
-        SET status='done', last_error=NULL, extracted_at=?, downloads_count=?
+        SET status='done', last_error=NULL, extracted_at=?, downloads_count=?, failure_count=0
         WHERE url=?
         """,
         (extracted_at, downloads_count, thread_url),
@@ -509,7 +512,16 @@ def mark_extracted(conn: sqlite3.Connection, thread_url: str, extracted_at: str,
 
 
 def mark_failed(conn: sqlite3.Connection, url: str, error: str) -> None:
-    conn.execute("UPDATE threads SET status='failed', last_error=? WHERE url=?", (error, url))
+    conn.execute(
+        """
+        UPDATE threads
+        SET status='failed',
+            last_error=?,
+            failure_count=COALESCE(failure_count, 0) + 1
+        WHERE url=?
+        """,
+        (error, url),
+    )
     conn.commit()
 
 
@@ -521,6 +533,7 @@ def iter_pending(conn: sqlite3.Connection, limit: int) -> Iterable[str]:
         WHERE status IN ('new','failed')
           AND (extracted_at IS NULL)
           AND NOT (status='failed' AND last_error='browser_check')
+          AND NOT (status='failed' AND COALESCE(failure_count, 0) >= 2)
         ORDER BY CASE status WHEN 'new' THEN 0 ELSE 1 END, discovered_at DESC
         LIMIT ?
         """,

@@ -38,6 +38,19 @@ from .feishu import FeishuClient, FeishuConfig
 from .dingtalk import DingTalkClient, DingTalkConfig
 from .scrape import BrowserCheckError, ScrapeResult, scrape_thread_text
 
+_CHINA_KEYWORDS = (
+    "中国", "中國", "china", "prc", "cn",
+    "北京", "上海", "天津", "重庆", "重慶",
+    "香港", "澳门", "澳門", "台湾", "台灣",
+    "河北", "山西", "辽宁", "遼寧", "吉林", "黑龙江", "黑龍江",
+    "江苏", "江蘇", "浙江", "安徽", "福建", "江西", "山东", "山東",
+    "河南", "湖北", "湖南", "广东", "廣東", "海南", "四川", "贵州", "貴州",
+    "云南", "雲南", "陕西", "陝西", "甘肃", "甘肅", "青海",
+    "内蒙古", "內蒙古", "广西", "廣西", "西藏", "宁夏", "寧夏", "新疆",
+    "深圳", "广州", "廣州", "杭州", "南京", "苏州", "蘇州", "武汉", "武漢",
+    "成都", "西安", "长沙", "長沙", "青岛", "青島", "厦门", "廈門", "宁波", "寧波",
+)
+
 
 @dataclass(frozen=True)
 class _PendingThread:
@@ -51,6 +64,13 @@ class _WorkerOutcome:
     url: str
     result: ScrapeResult | None = None
     browser_check: bool = False
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class _DiscoverOutcome:
+    forum_url: str
+    threads: tuple = ()
     error: str | None = None
 
 
@@ -81,6 +101,42 @@ def _scrape_thread_worker(
         return _WorkerOutcome(url=task.url, error=repr(e))
     finally:
         stop_browser(session)
+
+
+def _discover_forum_worker(
+    settings: Settings,
+    storage_state_path: Path,
+    forum_url: str,
+    cursor_iso: str | None,
+) -> _DiscoverOutcome:
+    session = start_browser(
+        headless=settings.headless,
+        storage_state_path=storage_state_path,
+        proxy_server=settings.proxy_server,
+    )
+    try:
+        page = new_page(session)
+        threads = tuple(
+            discover_today_threads(
+                page,
+                forum_url,
+                max_pages=(1 if getattr(settings, 'latest_page_only', False) else settings.max_pages_per_forum),
+                only_today=(False if (getattr(settings, 'full_site_mode', False) or getattr(settings, 'latest_page_only', False)) else settings.only_today),
+                max_age_hours=(settings.max_age_hours if not (getattr(settings, 'full_site_mode', False) or getattr(settings, 'latest_page_only', False)) else 24 * 365 * 100),
+                sort_query=settings.forum_sort_query,
+                cursor_iso=(None if getattr(settings, 'latest_page_only', False) else cursor_iso),
+            )
+        )
+        return _DiscoverOutcome(forum_url=forum_url, threads=threads)
+    except Exception as e:
+        return _DiscoverOutcome(forum_url=forum_url, error=repr(e))
+    finally:
+        stop_browser(session)
+
+
+def _is_china_related(*parts: str) -> bool:
+    haystack = "\n".join([(p or "") for p in parts]).lower()
+    return any(keyword.lower() in haystack for keyword in _CHINA_KEYWORDS)
 
 
 class _Tee:
@@ -245,7 +301,8 @@ def _deliver_to_dingtalk(conn, settings: Settings) -> None:
     delivered = 0
     attempted = 0
     failed = 0
-    fetch_limit = max_success * 5
+    filtered = 0
+    fetch_limit = max_success * 20
     if remaining <= 0:
         print(f"[dingtalk] summary limit={max_success} attempted=0 delivered=0 failed=0 remaining=0")
         return
@@ -268,6 +325,18 @@ def _deliver_to_dingtalk(conn, settings: Settings) -> None:
                 download_urls = []
         except Exception:
             download_urls = []
+
+        if not _is_china_related(post_url, title, first_post_text):
+            mark_delivered(
+                conn,
+                post_url=post_url,
+                provider="dingtalk",
+                delivered_at=datetime.utcnow().isoformat(),
+                message_id="filtered_non_china",
+            )
+            filtered += 1
+            print(f"[dingtalk] filtered_non_china: {post_url}")
+            continue
 
         # Build markdown
         parts: list[str] = []
@@ -331,10 +400,10 @@ def _deliver_to_dingtalk(conn, settings: Settings) -> None:
 
     if attempted or delivered or failed:
         print(
-            f"[dingtalk] summary limit={max_success} attempted={attempted} delivered={delivered} failed={failed} remaining={remaining}"
+            f"[dingtalk] summary limit={max_success} attempted={attempted} delivered={delivered} failed={failed} filtered={filtered} remaining={remaining}"
         )
     else:
-        print(f"[dingtalk] summary limit={max_success} attempted=0 delivered=0 failed=0 remaining={remaining}")
+        print(f"[dingtalk] summary limit={max_success} attempted=0 delivered=0 failed=0 filtered={filtered} remaining={remaining}")
 
 
 def run_daily(settings: Settings, project_root: Path) -> None:
@@ -373,30 +442,32 @@ def run_daily(settings: Settings, project_root: Path) -> None:
             discovered = 0
             inserted = 0
             sample_urls: list[str] = []
-            for forum_url in settings.forum_urls:
-                cursor_key = f"forum:{forum_url}"
-                cursor_iso = get_cursor(conn, cursor_key)
-                max_started_at: str | None = None
-                # In latest_page_only mode, we only fetch the first page per forum
-                for th in discover_today_threads(
-                    page,
-                    forum_url,
-                    max_pages=(1 if getattr(settings, 'latest_page_only', False) else settings.max_pages_per_forum),
-                    only_today=(False if (getattr(settings, 'full_site_mode', False) or getattr(settings, 'latest_page_only', False)) else settings.only_today),
-                    max_age_hours=(settings.max_age_hours if not (getattr(settings, 'full_site_mode', False) or getattr(settings, 'latest_page_only', False)) else 24 * 365 * 100),
-                    sort_query=settings.forum_sort_query,
-                    cursor_iso=(None if getattr(settings, 'latest_page_only', False) else cursor_iso),
-                ):
-                    if len(sample_urls) < 5:
-                        sample_urls.append(th.url)
-                    if upsert_discovered(conn, th.url, th.discovered_at, th.started_at):
-                        inserted += 1
-                    discovered += 1
-                    if th.started_at:
-                        if (max_started_at is None) or (th.started_at > max_started_at):
-                            max_started_at = th.started_at
-                if max_started_at:
-                    set_cursor(conn, cursor_key, max_started_at)
+            discover_workers = min(max(1, int(getattr(settings, "scrape_workers", 1))), len(settings.forum_urls))
+            print(f"[2/4] discover_workers={discover_workers}")
+            cursor_map = {forum_url: get_cursor(conn, f"forum:{forum_url}") for forum_url in settings.forum_urls}
+            with ThreadPoolExecutor(max_workers=discover_workers) as executor:
+                future_map = {
+                    executor.submit(_discover_forum_worker, settings, storage_state_path, forum_url, cursor_map.get(forum_url)): forum_url
+                    for forum_url in settings.forum_urls
+                }
+                for future in as_completed(future_map):
+                    forum_url = future_map[future]
+                    outcome = future.result()
+                    if outcome.error is not None:
+                        print(f"[2/4] discover failed: forum={forum_url} error={outcome.error}")
+                        continue
+                    max_started_at: str | None = None
+                    for th in outcome.threads:
+                        if len(sample_urls) < 5:
+                            sample_urls.append(th.url)
+                        if upsert_discovered(conn, th.url, th.discovered_at, th.started_at):
+                            inserted += 1
+                        discovered += 1
+                        if th.started_at:
+                            if (max_started_at is None) or (th.started_at > max_started_at):
+                                max_started_at = th.started_at
+                    if max_started_at:
+                        set_cursor(conn, f"forum:{forum_url}", max_started_at)
             print("[2/4] Discovery done.")
             print(f"[2/4] Discovered (pre-dedup yield count): {discovered}")
             print(f"[2/4] Inserted into SQLite: {inserted}")

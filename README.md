@@ -157,9 +157,11 @@ Start in: E:\code\py\dark_forums
 - The browser profile is reused through `data/storage_state.json`, which helps avoid repeated full logins.
 - `latest_page_only` is useful for lightweight hourly polling.
 - A small `scrape_workers` value such as `2` to `4` usually gives the best speed/anti-bot balance.
+- The same worker count is also used to parallelize forum discovery.
 - `full_site_mode` can generate much larger workloads and disables the usual freshness gating.
 - If Playwright cannot launch in a restricted shell, run it in a normal local shell.
 - Runtime config is loaded from `.env`, then `.env.local` if present.
+- DingTalk delivery is filtered to China-related posts only, based on URL/title/content keyword matching.
 
 ## Security
 
