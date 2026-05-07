@@ -24,6 +24,7 @@ class Settings:
     headless: bool
     reply_templates: tuple[str, ...]
     max_threads_per_day: int
+    scrape_workers: int
     feishu_enabled: bool
     feishu_app_id: str
     feishu_app_secret: str
@@ -67,6 +68,7 @@ def load_settings(project_root: Path) -> Settings:
     reply_templates = tuple([s.strip() for s in reply_templates_raw.split("|") if s.strip()]) or ("Thanks",)
 
     max_threads_per_day = int(os.getenv("DARKFORUMS_MAX_THREADS_PER_DAY", "200").strip())
+    scrape_workers = max(1, int(os.getenv("DARKFORUMS_SCRAPE_WORKERS", "1").strip()))
 
     feishu_enabled = os.getenv("FEISHU_ENABLED", "0").strip() not in {"0", "false", "False", ""}
     feishu_app_id = os.getenv("FEISHU_APP_ID", "").strip()
@@ -120,6 +122,7 @@ def load_settings(project_root: Path) -> Settings:
         headless=headless,
         reply_templates=reply_templates,
         max_threads_per_day=max_threads_per_day,
+        scrape_workers=scrape_workers,
         feishu_enabled=feishu_enabled,
         feishu_app_id=feishu_app_id,
         feishu_app_secret=feishu_app_secret,

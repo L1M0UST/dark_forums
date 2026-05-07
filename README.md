@@ -73,6 +73,7 @@ Key variables:
 - `DARKFORUMS_MAX_AGE_HOURS`: age cutoff for normal incremental crawling
 - `DARKFORUMS_REPLY_TEMPLATES`: reply templates separated by `|`
 - `DARKFORUMS_HEADLESS`: `1` for headless mode, `0` for visible browser mode
+- `DARKFORUMS_SCRAPE_WORKERS`: number of concurrent scraping workers for thread-content fetches
 - `DINGTALK_ENABLED` / `DINGTALK_WEBHOOK` / `DINGTALK_SECRET`
 - `FEISHU_ENABLED` / `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `FEISHU_CHAT_ID`
 
@@ -155,6 +156,7 @@ Start in: E:\code\py\dark_forums
 
 - The browser profile is reused through `data/storage_state.json`, which helps avoid repeated full logins.
 - `latest_page_only` is useful for lightweight hourly polling.
+- A small `scrape_workers` value such as `2` to `4` usually gives the best speed/anti-bot balance.
 - `full_site_mode` can generate much larger workloads and disables the usual freshness gating.
 - If Playwright cannot launch in a restricted shell, run it in a normal local shell.
 - Runtime config is loaded from `.env`, then `.env.local` if present.

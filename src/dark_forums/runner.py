@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 import json
 import base64
 import hashlib
+from dataclasses import dataclass
 
 from .auth import login, save_storage_state
 from .browser import human_delay, new_page, start_browser, stop_browser
@@ -34,7 +36,51 @@ from .db import (
 from .discover import discover_today_threads
 from .feishu import FeishuClient, FeishuConfig
 from .dingtalk import DingTalkClient, DingTalkConfig
-from .scrape import BrowserCheckError, scrape_thread_text
+from .scrape import BrowserCheckError, ScrapeResult, scrape_thread_text
+
+
+@dataclass(frozen=True)
+class _PendingThread:
+    url: str
+    may_reply: bool
+    created_at_cutoff_iso: str | None
+
+
+@dataclass(frozen=True)
+class _WorkerOutcome:
+    url: str
+    result: ScrapeResult | None = None
+    browser_check: bool = False
+    error: str | None = None
+
+
+def _scrape_thread_worker(
+    settings: Settings,
+    storage_state_path: Path,
+    task: _PendingThread,
+) -> _WorkerOutcome:
+    session = start_browser(
+        headless=settings.headless,
+        storage_state_path=storage_state_path,
+        proxy_server=settings.proxy_server,
+    )
+    try:
+        page = new_page(session)
+        result = scrape_thread_text(
+            page,
+            task.url,
+            settings.reply_templates,
+            settings.data_dir,
+            may_reply=task.may_reply,
+            created_at_cutoff_iso=task.created_at_cutoff_iso,
+        )
+        return _WorkerOutcome(url=task.url, result=result)
+    except BrowserCheckError:
+        return _WorkerOutcome(url=task.url, browser_check=True, error="browser_check")
+    except Exception as e:
+        return _WorkerOutcome(url=task.url, error=repr(e))
+    finally:
+        stop_browser(session)
 
 
 class _Tee:
@@ -394,6 +440,7 @@ def run_daily(settings: Settings, project_root: Path) -> None:
                     continue
             return None
 
+        pending_tasks: list[_PendingThread] = []
         for url in iter_pending(conn, fetch_limit):
             try:
                 canon = canonicalize_thread_url(url)
@@ -428,7 +475,6 @@ def run_daily(settings: Settings, project_root: Path) -> None:
                     except Exception:
                         pass
                 mark_processing(conn, url)
-                human_delay()
                 base_may_reply = not has_reply(conn, url)
                 allow_reply = False
                 if getattr(settings, 'full_site_mode', False):
@@ -442,94 +488,127 @@ def run_daily(settings: Settings, project_root: Path) -> None:
                         allow_reply = dt0 >= cutoff_dt and base_may_reply
                     except Exception:
                         allow_reply = False
-                # If we don't know the creation time yet, be conservative and avoid replying on first load
-                result = scrape_thread_text(
-                    page,
-                    url,
-                    settings.reply_templates,
-                    settings.data_dir,
-                    may_reply=(False if getattr(settings, 'full_site_mode', False) else allow_reply),
-                    created_at_cutoff_iso=(None if (getattr(settings, 'full_site_mode', False) or getattr(settings, 'latest_page_only', False)) else cutoff_dt.isoformat()),
+                pending_tasks.append(
+                    _PendingThread(
+                        url=url,
+                        may_reply=(False if getattr(settings, 'full_site_mode', False) else allow_reply),
+                        created_at_cutoff_iso=(
+                            None
+                            if (getattr(settings, 'full_site_mode', False) or getattr(settings, 'latest_page_only', False))
+                            else cutoff_dt.isoformat()
+                        ),
+                    )
                 )
-
-                title = (result.title or "").strip()
-                created_at = (result.created_at or "").strip()
-                author_name = (result.author_name or "").strip()
-                first_post_text = (result.first_post_text or "").strip()
-                download_urls = tuple(u.strip() for u in (result.download_urls or ()) if u and u.strip())
-
-                # Log created_at for every processed thread
-                print(f"[meta] created_at={created_at or '(missing)'} url={url}")
-
-                # Enforce hard cutoff after parsing page metadata (disabled in full-site or latest_page_only mode)
-                if not (getattr(settings, 'full_site_mode', False) or getattr(settings, 'latest_page_only', False)):
-                    parsed_dt = _parse_localized_dt(created_at)
-                    if parsed_dt is None:
-                        mark_failed(conn, url, "created_at_unparseable")
-                        print(f"[failed] {url} -> created_at_unparseable")
-                        processed += 1
-                        failed_threads += 1
-                        charged += 1
-                        continue
-                    if parsed_dt < cutoff_dt:
-                        mark_failed(conn, url, "older_than_cutoff")
-                        print(f"[skip] {url} -> older_than_cutoff created_at={created_at}")
-                        processed += 1
-                        failed_threads += 1
-                        charged += 1
-                        continue
-
-                # If we replied in this run, mark it to avoid duplicate replies later
-                if getattr(result, 'did_reply', False):
-                    try:
-                        mark_replied(conn, url, result.fetched_at)
-                    except Exception:
-                        pass
-
-                # Always insert into posts table with safe fallbacks (store whatever we have)
-                if not created_at:
-                    created_at = result.fetched_at  # fallback to fetched time to satisfy NOT NULL
-                rec = PostRecord(
-                    url=url,
-                    title=title or "",
-                    created_at=created_at or "",
-                    author_name=author_name or "",
-                    author_posts=(result.author_posts or None),
-                    author_threads=(result.author_threads or None),
-                    author_joined=(result.author_joined or None),
-                    author_reputation=(result.author_reputation or None),
-                    author_contacts=(result.author_contacts or None),
-                    scraped_at=result.fetched_at,
-                    first_post_text=first_post_text or "",
-                    download_urls_json=json.dumps(list(download_urls), ensure_ascii=False),
-                    screenshot_path=(result.screenshot_path or None),
-                )
-                insert_post(conn, rec)
-                mark_extracted(conn, url, result.fetched_at, downloads_count=len(download_urls))
-                print(f"[ok] {url} -> inserted post (downloads {len(download_urls)})")
-                ok_threads += 1
-                total_download_urls += len(download_urls)
-                inserted_download_rows += 1
-                processed += 1
-                charged += 1
-            except BrowserCheckError:
-                mark_failed(conn, url, "browser_check")
-                print(f"[skip] {url} -> browser_check")
-                processed += 1
-                failed_threads += 1
-                skipped_browser_check += 1
             except Exception as e:
                 mark_failed(conn, url, repr(e))
                 print(f"[failed] {url} -> {repr(e)}")
                 processed += 1
                 failed_threads += 1
                 charged += 1
+            if settings.max_threads_per_day > 0 and len(pending_tasks) >= settings.max_threads_per_day:
+                break
 
-            if settings.max_threads_per_day > 0 and charged >= settings.max_threads_per_day:
-                break
-            if skipped_browser_check >= max_browser_check_skips:
-                print(f"[skip] hit browser_check skip cap: {skipped_browser_check}")
-                break
+        if pending_tasks:
+            worker_count = max(1, int(getattr(settings, "scrape_workers", 1)))
+            worker_count = min(worker_count, len(pending_tasks))
+            print(f"[3/4] queued={len(pending_tasks)} scrape_workers={worker_count}")
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                future_map = {}
+                for task in pending_tasks:
+                    future = executor.submit(_scrape_thread_worker, settings, storage_state_path, task)
+                    future_map[future] = task.url
+
+                for future in as_completed(future_map):
+                    url = future_map[future]
+                    try:
+                        outcome = future.result()
+                    except Exception as e:
+                        mark_failed(conn, url, repr(e))
+                        print(f"[failed] {url} -> {repr(e)}")
+                        processed += 1
+                        failed_threads += 1
+                        charged += 1
+                        continue
+
+                    if outcome.browser_check:
+                        mark_failed(conn, url, "browser_check")
+                        print(f"[skip] {url} -> browser_check")
+                        processed += 1
+                        failed_threads += 1
+                        skipped_browser_check += 1
+                        if skipped_browser_check >= max_browser_check_skips:
+                            print(f"[skip] hit browser_check skip cap: {skipped_browser_check}")
+                            break
+                        continue
+
+                    if outcome.error is not None or outcome.result is None:
+                        err = outcome.error or "unknown_worker_error"
+                        mark_failed(conn, url, err)
+                        print(f"[failed] {url} -> {err}")
+                        processed += 1
+                        failed_threads += 1
+                        charged += 1
+                        continue
+
+                    result = outcome.result
+                    title = (result.title or "").strip()
+                    created_at = (result.created_at or "").strip()
+                    author_name = (result.author_name or "").strip()
+                    first_post_text = (result.first_post_text or "").strip()
+                    download_urls = tuple(u.strip() for u in (result.download_urls or ()) if u and u.strip())
+
+                    print(f"[meta] created_at={created_at or '(missing)'} url={url}")
+
+                    if not (getattr(settings, 'full_site_mode', False) or getattr(settings, 'latest_page_only', False)):
+                        parsed_dt = _parse_localized_dt(created_at)
+                        if parsed_dt is None:
+                            mark_failed(conn, url, "created_at_unparseable")
+                            print(f"[failed] {url} -> created_at_unparseable")
+                            processed += 1
+                            failed_threads += 1
+                            charged += 1
+                            continue
+                        if parsed_dt < cutoff_dt:
+                            mark_failed(conn, url, "older_than_cutoff")
+                            print(f"[skip] {url} -> older_than_cutoff created_at={created_at}")
+                            processed += 1
+                            failed_threads += 1
+                            charged += 1
+                            continue
+
+                    if getattr(result, 'did_reply', False):
+                        try:
+                            mark_replied(conn, url, result.fetched_at)
+                        except Exception:
+                            pass
+
+                    if not created_at:
+                        created_at = result.fetched_at
+                    rec = PostRecord(
+                        url=url,
+                        title=title or "",
+                        created_at=created_at or "",
+                        author_name=author_name or "",
+                        author_posts=(result.author_posts or None),
+                        author_threads=(result.author_threads or None),
+                        author_joined=(result.author_joined or None),
+                        author_reputation=(result.author_reputation or None),
+                        author_contacts=(result.author_contacts or None),
+                        scraped_at=result.fetched_at,
+                        first_post_text=first_post_text or "",
+                        download_urls_json=json.dumps(list(download_urls), ensure_ascii=False),
+                        screenshot_path=(result.screenshot_path or None),
+                    )
+                    insert_post(conn, rec)
+                    mark_extracted(conn, url, result.fetched_at, downloads_count=len(download_urls))
+                    print(f"[ok] {url} -> inserted post (downloads {len(download_urls)})")
+                    ok_threads += 1
+                    total_download_urls += len(download_urls)
+                    inserted_download_rows += 1
+                    processed += 1
+                    charged += 1
+                    if settings.max_threads_per_day > 0 and charged >= settings.max_threads_per_day:
+                        break
 
         # Deliver notifications
         if getattr(settings, 'dingtalk_enabled', False):
