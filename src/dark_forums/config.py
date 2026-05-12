@@ -34,6 +34,10 @@ class Settings:
     dingtalk_webhook: str
     dingtalk_secret: str
     dingtalk_max_posts_per_run: int
+    mimo_base_url: str
+    mimo_api_key: str
+    mimo_model: str
+    mimo_proxy_server: str
     data_dir: Path
     logs_dir: Path
 
@@ -84,6 +88,10 @@ def load_settings(project_root: Path) -> Settings:
     dingtalk_secret = os.getenv("DINGTALK_SECRET", "").strip()
     # default fallback to FEISHU_MAX_POSTS_PER_RUN if present to keep similar behavior
     dingtalk_max_posts_per_run = int(os.getenv("DINGTALK_MAX_POSTS_PER_RUN", os.getenv("FEISHU_MAX_POSTS_PER_RUN", "20")).strip())
+    mimo_base_url = os.getenv("MIMO_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1").strip().rstrip("/")
+    mimo_api_key = os.getenv("MIMO_API_KEY", "").strip()
+    mimo_model = os.getenv("MIMO_MODEL", "MiMo-V2.5-Pro").strip()
+    mimo_proxy_server = os.getenv("MIMO_PROXY_SERVER", proxy_server).strip()
 
     if dingtalk_enabled and not dingtalk_webhook:
         raise ValueError("DingTalk enabled but DINGTALK_WEBHOOK not set")
@@ -132,6 +140,10 @@ def load_settings(project_root: Path) -> Settings:
         dingtalk_webhook=dingtalk_webhook,
         dingtalk_secret=dingtalk_secret,
         dingtalk_max_posts_per_run=dingtalk_max_posts_per_run,
+        mimo_base_url=mimo_base_url,
+        mimo_api_key=mimo_api_key,
+        mimo_model=mimo_model,
+        mimo_proxy_server=mimo_proxy_server,
         data_dir=data_dir,
         logs_dir=logs_dir,
     )

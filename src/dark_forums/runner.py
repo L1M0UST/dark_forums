@@ -36,6 +36,7 @@ from .db import (
 from .discover import discover_today_threads
 from .feishu import FeishuClient, FeishuConfig
 from .dingtalk import DingTalkClient, DingTalkConfig
+from .mimo import MimoConfig, MimoTranslator
 from .scrape import BrowserCheckError, ScrapeResult, scrape_thread_text
 
 _CHINA_KEYWORDS = (
@@ -282,6 +283,16 @@ def _deliver_to_dingtalk(conn, settings: Settings) -> None:
 
     cfg = DingTalkConfig(webhook=settings.dingtalk_webhook, secret=(settings.dingtalk_secret or None))
     client = DingTalkClient(cfg)
+    translator = None
+    if settings.mimo_api_key:
+        translator = MimoTranslator(
+            MimoConfig(
+                base_url=settings.mimo_base_url,
+                api_key=settings.mimo_api_key,
+                model=settings.mimo_model,
+                proxy_server=settings.mimo_proxy_server,
+            )
+        )
 
     remaining = 0
     try:
@@ -361,9 +372,17 @@ def _deliver_to_dingtalk(conn, settings: Settings) -> None:
             parts.append("\n> 1楼内容摘要:\n> " + excerpt.replace("\n", "\n> "))
 
         text = "\n".join(parts)
+        send_title = title[:128]
+        send_text = text
+        if translator is not None:
+            try:
+                send_title = translator.translate_title_to_zh(title)[:128]
+                send_text = translator.translate_markdown_to_zh(text)
+            except Exception as e:
+                print(f"[dingtalk] translate_failed fallback_original: {post_url} -> {repr(e)}")
 
         try:
-            client.send_markdown(title=title[:128], text=text)
+            client.send_markdown(title=send_title, text=send_text)
             mark_delivered(conn, post_url=post_url, provider="dingtalk", delivered_at=datetime.utcnow().isoformat(), message_id=None)
             delivered += 1
             print(f"[dingtalk] delivered: {post_url}")

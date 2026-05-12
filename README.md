@@ -75,6 +75,7 @@ Key variables:
 - `DARKFORUMS_HEADLESS`: `1` for headless mode, `0` for visible browser mode
 - `DARKFORUMS_SCRAPE_WORKERS`: number of concurrent scraping workers for thread-content fetches
 - `DINGTALK_ENABLED` / `DINGTALK_WEBHOOK` / `DINGTALK_SECRET`
+- `MIMO_BASE_URL` / `MIMO_API_KEY` / `MIMO_MODEL` / `MIMO_PROXY_SERVER`: translate DingTalk messages to Simplified Chinese before sending
 - `FEISHU_ENABLED` / `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `FEISHU_CHAT_ID`
 
 Do not commit real secrets. Use `.env.local` for private values.
@@ -162,6 +163,7 @@ Start in: E:\code\py\dark_forums
 - If Playwright cannot launch in a restricted shell, run it in a normal local shell.
 - Runtime config is loaded from `.env`, then `.env.local` if present.
 - DingTalk delivery is filtered to China-related posts only, based on URL/title/content keyword matching.
+- If MiMo translation is configured, DingTalk titles and markdown bodies are translated to Simplified Chinese before sending.
 
 ## Security
 
