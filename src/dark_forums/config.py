@@ -90,7 +90,7 @@ def load_settings(project_root: Path) -> Settings:
     dingtalk_max_posts_per_run = int(os.getenv("DINGTALK_MAX_POSTS_PER_RUN", os.getenv("FEISHU_MAX_POSTS_PER_RUN", "20")).strip())
     mimo_base_url = os.getenv("MIMO_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1").strip().rstrip("/")
     mimo_api_key = os.getenv("MIMO_API_KEY", "").strip()
-    mimo_model = os.getenv("MIMO_MODEL", "MiMo-V2.5-Pro").strip()
+    mimo_model = os.getenv("MIMO_MODEL", "mimo-v2.5-pro").strip()
     mimo_proxy_server = os.getenv("MIMO_PROXY_SERVER", proxy_server).strip()
 
     if dingtalk_enabled and not dingtalk_webhook:

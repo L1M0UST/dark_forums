@@ -46,12 +46,28 @@ class MimoTranslator:
             "data": payload,
             "timeout": 60,
         }
+
+        attempts: list[dict] = []
         if proxies is not None:
-            request_kwargs["proxies"] = proxies
-        try:
-            resp = requests.post(url, **request_kwargs)
-        except SSLError:
-            resp = requests.post(url, verify=False, **request_kwargs)
+            attempts.append({"proxies": proxies})
+            attempts.append({"proxies": proxies, "verify": False})
+        attempts.append({})
+        attempts.append({"verify": False})
+
+        last_exc: Exception | None = None
+        resp = None
+        for extra in attempts:
+            try:
+                resp = requests.post(url, **request_kwargs, **extra)
+                break
+            except SSLError as exc:
+                last_exc = exc
+                continue
+            except Exception as exc:
+                last_exc = exc
+                continue
+        if resp is None:
+            raise RuntimeError(f"mimo_translate_request_failed: {repr(last_exc)}")
         resp.raise_for_status()
         data = resp.json()
         try:
@@ -64,7 +80,7 @@ class MimoTranslator:
 
     def translate_title_to_zh(self, title: str) -> str:
         return self._chat(
-            "Translate the input title into concise Simplified Chinese. Keep technical terms, counts, org names, IDs, and URLs accurate. Output only the translated title.",
+            "Translate the input title into concise Simplified Chinese. Keep technical terms, counts, organization names, IDs, and URLs accurate. Output only the translated title.",
             title,
         )
 
