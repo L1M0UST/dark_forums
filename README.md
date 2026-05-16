@@ -1,24 +1,25 @@
 # dark_forums
 
-`dark_forums` is a Playwright-based scraper for the DarkForums site. It logs in with a real account, discovers fresh threads from configured forum pages, optionally posts a reply to unlock hidden content, extracts the first post plus download links, stores the result in SQLite, and can push new items to DingTalk or Feishu.
+`dark_forums` 是一个基于 Playwright 的 DarkForums 自动抓取项目。它会使用真实账号登录站点，从配置好的 forum 列表页发现最新帖子，按需自动回帖解锁隐藏内容，提取首楼正文和下载链接，保存到 SQLite，并将符合条件的内容推送到钉钉或飞书。
 
-## What It Does
+## 功能概览
 
-- Logs in with persisted browser state in `data/storage_state.json`
-- Discovers thread URLs from one or more forum listing pages
-- Supports incremental crawling with forum cursors
-- Optionally replies to threads that require a reply before content becomes visible
-- Extracts title, created time, author info, first-post text, download links, and screenshots
-- Stores crawl state and final records in `data/db.sqlite`
-- Pushes undelivered posts to DingTalk or Feishu
-- Writes daily logs to `logs/YYYY-MM-DD.log`
+- 复用 `data/storage_state.json` 中的登录态，减少重复登录
+- 从多个 forum 列表页发现帖子 URL
+- 使用 SQLite 游标和去重机制做增量抓取
+- 对“回复可见”的帖子自动回帖后再次提取
+- 提取标题、发布时间、作者信息、首楼正文、下载链接和截图
+- 将抓取结果保存到 `data/db.sqlite`
+- 支持钉钉、飞书消息推送
+- 每日运行日志写入 `logs/YYYY-MM-DD.log`
 
-## Project Layout
+## 目录结构
 
 ```text
 dark_forums/
 ├─ run.py
 ├─ requirements.txt
+├─ .env
 ├─ .env.example
 ├─ PROJECT_MEMORY.md
 ├─ src/dark_forums/
@@ -30,6 +31,7 @@ dark_forums/
 │  ├─ dingtalk.py
 │  ├─ discover.py
 │  ├─ feishu.py
+│  ├─ mimo.py
 │  ├─ runner.py
 │  ├─ scrape.py
 │  └─ text_extract.py
@@ -37,95 +39,98 @@ dark_forums/
 └─ logs/
 ```
 
-## Requirements
+## 环境要求
 
 - Python 3.12
-- Playwright Chromium runtime
-- Network access to the target site
-- Optional local proxy if the target site requires it
+- Playwright Chromium 运行时
+- 能访问目标站点的网络环境
+- 如果目标站点需要代理，准备好本地代理
 
-Install dependencies:
+安装依赖：
 
 ```bash
 python -m pip install -r requirements.txt
 python -m playwright install chromium
 ```
 
-## Configuration
+## 配置说明
 
-The repository includes a tracked `.env` file with keys only and no values.
+仓库中提交的 `.env` 只保留键名，不放真实值。
 
-Recommended setup:
+推荐做法：
 
-- Keep `.env` as the shared template
-- Put your real local secrets in `.env.local`
-- `.env.local` is ignored by Git and overrides `.env` at runtime
+- `.env` 作为公共模板
+- 本机真实配置写到 `.env.local`
+- 运行时先加载 `.env`，再加载 `.env.local`
+- `.env.local` 已被 Git 忽略，不会推送到仓库
 
-Key variables:
+常用配置项：
 
-- `DARKFORUMS_BASE_URL`: site entry URL, usually `https://darkforums.su/index.php`
+- `DARKFORUMS_BASE_URL`：站点入口地址
 - `DARKFORUMS_USERNAME`
 - `DARKFORUMS_PASSWORD`
-- `DARKFORUMS_FORUM_URLS`: forum URLs separated by `|`
-- `DARKFORUMS_PROXY_SERVER`: optional proxy, leave empty if unused
-- `DARKFORUMS_LATEST_PAGE_ONLY`: `1` to crawl only the newest page of each forum
-- `DARKFORUMS_FULL_SITE_MODE`: `1` for broad scanning without the usual time-window limits
-- `DARKFORUMS_MAX_AGE_HOURS`: age cutoff for normal incremental crawling
-- `DARKFORUMS_REPLY_TEMPLATES`: reply templates separated by `|`
-- `DARKFORUMS_HEADLESS`: `1` for headless mode, `0` for visible browser mode
-- `DARKFORUMS_SCRAPE_WORKERS`: number of concurrent scraping workers for thread-content fetches
+- `DARKFORUMS_FORUM_URLS`：多个 forum URL 用 `|` 分隔
+- `DARKFORUMS_PROXY_SERVER`：站点抓取代理，不需要可留空
+- `DARKFORUMS_LATEST_PAGE_ONLY`：是否只抓每个 forum 最新一页
+- `DARKFORUMS_FULL_SITE_MODE`：全站宽范围扫描模式
+- `DARKFORUMS_MAX_AGE_HOURS`：常规增量抓取时间窗口
+- `DARKFORUMS_REPLY_TEMPLATES`：自动回帖模板，使用 `|` 分隔
+- `DARKFORUMS_HEADLESS`：是否无头运行
+- `DARKFORUMS_SCRAPE_WORKERS`：并发 worker 数，既用于发现阶段，也用于帖子内容抓取阶段
 - `DINGTALK_ENABLED` / `DINGTALK_WEBHOOK` / `DINGTALK_SECRET`
-- `MIMO_BASE_URL` / `MIMO_API_KEY` / `MIMO_MODEL` / `MIMO_PROXY_SERVER`: translate DingTalk messages to Simplified Chinese before sending
+- `MIMO_BASE_URL` / `MIMO_API_KEY` / `MIMO_MODEL` / `MIMO_PROXY_SERVER`
 - `FEISHU_ENABLED` / `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `FEISHU_CHAT_ID`
 
-Do not commit real secrets. Use `.env.local` for private values.
+请不要把真实密钥提交到仓库，私有值统一放到 `.env.local`。
 
-## How To Run
+## 运行方式
 
-Run from the project root:
+在项目根目录执行：
 
 ```bash
 python run.py
 ```
 
-Alternative package entrypoint:
+或者使用包入口：
 
 ```bash
 python -m dark_forums
 ```
 
-## Verified Run
+## 当前抓取逻辑
 
-Verified locally on May 6, 2026 by running `python run.py` outside the sandbox so Playwright could launch Chromium.
+- 每次优先访问配置好的 forum 列表页
+- 可配置为“每个 forum 只抓最新一页”
+- 发现到的线程先写入 SQLite 去重
+- 已成功提取并入库的线程不会重复抓取
+- `failed` 线程只会再重试一次
+- 提取成功后会将线程状态标记为 `done`
 
-Observed result:
+## 推送逻辑
 
-- Login succeeded
-- Discovery ran against 1 configured forum
-- 10 threads were discovered and inserted
-- 10 threads were scraped successfully
-- 2 threads triggered auto-reply before extraction
-- 41 download URLs were extracted in total
-- 5 DingTalk notifications were delivered successfully
-- SQLite summary after the run: `threads_total=441`, `posts_total=80`, `pending=76`
-- Old thread queue entries were pruned: `pruned_old_threads=424`
+### 钉钉
 
-Generated artifacts included:
+- 仅推送与中国相关的内容
+- 关键词匹配范围包括中国、港澳台、四个直辖市、各省和一批重点城市
+- 发送前会调用 MiMo OpenAI 兼容接口，把标题和 markdown 正文翻译为简体中文
+- 如果 MiMo 翻译失败，会自动回退为原文发送，避免影响主流程
 
-- [data/db.sqlite](/E:/code/py/dark_forums/data/db.sqlite)
-- [data/storage_state.json](/E:/code/py/dark_forums/data/storage_state.json)
-- [logs/2026-05-06.log](/E:/code/py/dark_forums/logs/2026-05-06.log)
+### 飞书
 
-## Data Model
+- 支持把未投递的帖子推送到飞书群聊
+- 可附带首楼截图
 
-Main SQLite tables:
+## SQLite 数据结构
 
-- `threads`: discovered URLs plus queue state
-- `posts`: final extracted thread records
-- `cursors`: per-forum incremental crawl cursor
-- `deliveries`: notification deduplication state
+主要表如下：
 
-`posts` stores one row per thread, including:
+- `threads`：发现到的线程队列与状态
+- `posts`：最终提取结果，一帖一行
+- `cursors`：每个 forum 的增量游标
+- `deliveries`：消息投递去重记录
+- `replies`：自动回帖记录
+
+`posts` 表核心字段：
 
 - `url`
 - `title`
@@ -141,11 +146,11 @@ Main SQLite tables:
 - `download_urls_json`
 - `screenshot_path`
 
-## Scheduling
+## 调度建议
 
-Typical usage is to run the script once per hour.
+典型部署方式是每小时运行一次。
 
-Windows Task Scheduler example:
+Windows 任务计划示例：
 
 ```text
 Program/script: python
@@ -153,20 +158,17 @@ Arguments: E:\code\py\dark_forums\run.py
 Start in: E:\code\py\dark_forums
 ```
 
-## Notes
+## 使用建议
 
-- The browser profile is reused through `data/storage_state.json`, which helps avoid repeated full logins.
-- `latest_page_only` is useful for lightweight hourly polling.
-- A small `scrape_workers` value such as `2` to `4` usually gives the best speed/anti-bot balance.
-- The same worker count is also used to parallelize forum discovery.
-- `full_site_mode` can generate much larger workloads and disables the usual freshness gating.
-- If Playwright cannot launch in a restricted shell, run it in a normal local shell.
-- Runtime config is loaded from `.env`, then `.env.local` if present.
-- DingTalk delivery is filtered to China-related posts only, based on URL/title/content keyword matching.
-- If MiMo translation is configured, DingTalk titles and markdown bodies are translated to Simplified Chinese before sending.
+- `latest_page_only=1` 适合高频轮询
+- `scrape_workers` 建议从 `2` 到 `4` 开始，速度和风控更平衡
+- 同一个 worker 数同时用于 forum 发现并发和帖子抓取并发
+- `full_site_mode` 会显著增加抓取量，建议谨慎开启
+- 如果浏览器拉起受限，优先在正常本地 shell 中运行
+- MiMo 翻译在这台机器上优先走 `MIMO_PROXY_SERVER` 更稳定
 
-## Security
+## 安全说明
 
-- Rotate any secrets that were ever stored in a tracked config file before publishing this repository.
-- Keep `.env.local`, SQLite data, screenshots, logs, and browser state out of Git.
-- Review the target site's terms, account risk, and local legal constraints before automated use.
+- 如果历史上曾把真实密钥写入可追踪文件，请先轮换密钥
+- `.env.local`、SQLite 数据、截图、日志、浏览器登录态都不要提交到 Git
+- 使用前请自行评估目标站点条款、账号风险和当地法律要求
