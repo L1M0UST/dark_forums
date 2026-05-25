@@ -31,7 +31,7 @@ dark_forums/
 │  ├─ dingtalk.py
 │  ├─ discover.py
 │  ├─ feishu.py
-│  ├─ mimo.py
+│  ├─ openai_compat.py
 │  ├─ runner.py
 │  ├─ scrape.py
 │  └─ text_extract.py
@@ -78,7 +78,9 @@ python -m playwright install chromium
 - `DARKFORUMS_HEADLESS`：是否无头运行
 - `DARKFORUMS_SCRAPE_WORKERS`：并发 worker 数，既用于发现阶段，也用于帖子内容抓取阶段
 - `DINGTALK_ENABLED` / `DINGTALK_WEBHOOK` / `DINGTALK_SECRET`
+- `OPENAI_COMPAT_BASE_URL` / `OPENAI_COMPAT_API_KEY` / `OPENAI_COMPAT_MODEL` / `OPENAI_COMPAT_PROXY_SERVER`
 - `MIMO_BASE_URL` / `MIMO_API_KEY` / `MIMO_MODEL` / `MIMO_PROXY_SERVER`
+说明：`MIMO_*` 目前作为向后兼容别名保留，优先推荐使用 `OPENAI_COMPAT_*`
 - `FEISHU_ENABLED` / `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `FEISHU_CHAT_ID`
 
 请不要把真实密钥提交到仓库，私有值统一放到 `.env.local`。
@@ -112,8 +114,9 @@ python -m dark_forums
 
 - 仅推送与中国相关的内容
 - 关键词匹配范围包括中国、港澳台、四个直辖市、各省和一批重点城市
-- 发送前会调用 MiMo OpenAI 兼容接口，把标题和 markdown 正文翻译为简体中文
-- 如果 MiMo 翻译失败，会自动回退为原文发送，避免影响主流程
+- 发送前会调用 OpenAI 兼容大模型接口，把标题和 markdown 正文翻译为简体中文
+- 默认已接通 MiMo，可随时切换为其他 OpenAI 兼容模型服务
+- 如果翻译失败，会把失败原因写进钉钉消息，再附原文发送，避免静默失败
 
 ### 飞书
 
@@ -165,7 +168,7 @@ Start in: E:\code\py\dark_forums
 - 同一个 worker 数同时用于 forum 发现并发和帖子抓取并发
 - `full_site_mode` 会显著增加抓取量，建议谨慎开启
 - 如果浏览器拉起受限，优先在正常本地 shell 中运行
-- MiMo 翻译在这台机器上优先走 `MIMO_PROXY_SERVER` 更稳定
+- OpenAI 兼容翻译在这台机器上优先走 `OPENAI_COMPAT_PROXY_SERVER` 或 `MIMO_PROXY_SERVER` 更稳定
 
 ## 安全说明
 

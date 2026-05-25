@@ -1,42 +1,42 @@
 from __future__ import annotations
 
-from pathlib import Path
-import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
-import json
 import base64
 import hashlib
+import json
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from .auth import login, save_storage_state
-from .browser import human_delay, new_page, start_browser, stop_browser
+from .browser import new_page, start_browser, stop_browser
 from .config import Settings
 from .db import (
     PostRecord,
     canonicalize_thread_url,
     get_cursor,
+    get_thread_created_at,
     has_post,
+    has_reply,
     insert_post,
+    iter_pending,
     iter_undelivered_posts,
-    mark_extracted,
     mark_delivered,
+    mark_extracted,
     mark_failed,
     mark_processing,
+    mark_replied,
     migrate_thread_url,
     open_db,
     prune_threads,
     set_cursor,
     upsert_discovered,
-    iter_pending,
-    has_reply,
-    mark_replied,
-    get_thread_created_at,
 )
+from .dingtalk import DingTalkClient, DingTalkConfig
 from .discover import discover_today_threads
 from .feishu import FeishuClient, FeishuConfig
-from .dingtalk import DingTalkClient, DingTalkConfig
-from .mimo import MimoConfig, MimoTranslator
+from .openai_compat import OpenAICompatConfig, OpenAICompatTranslator
 from .scrape import BrowserCheckError, ScrapeResult, scrape_thread_text
 
 _CHINA_KEYWORDS = (
@@ -51,6 +51,8 @@ _CHINA_KEYWORDS = (
     "深圳", "广州", "廣州", "杭州", "南京", "苏州", "蘇州", "武汉", "武漢",
     "成都", "西安", "长沙", "長沙", "青岛", "青島", "厦门", "廈門", "宁波", "寧波",
 )
+
+_CHONGQING_KEYWORDS = ("重庆", "重慶", "chongqing")
 
 
 @dataclass(frozen=True)
@@ -73,6 +75,39 @@ class _DiscoverOutcome:
     forum_url: str
     threads: tuple = ()
     error: str | None = None
+
+
+class _Tee:
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, s: str) -> int:
+        for st in self._streams:
+            st.write(s)
+        return len(s)
+
+    def flush(self) -> None:
+        for st in self._streams:
+            st.flush()
+
+    def isatty(self) -> bool:
+        for st in self._streams:
+            try:
+                if st.isatty():
+                    return True
+            except Exception:
+                continue
+        return False
+
+
+def _is_china_related(*parts: str) -> bool:
+    haystack = "\n".join([(p or "") for p in parts]).lower()
+    return any(keyword.lower() in haystack for keyword in _CHINA_KEYWORDS)
+
+
+def _is_chongqing_related(*parts: str) -> bool:
+    haystack = "\n".join([(p or "") for p in parts]).lower()
+    return any(keyword.lower() in haystack for keyword in _CHONGQING_KEYWORDS)
 
 
 def _scrape_thread_worker(
@@ -121,11 +156,11 @@ def _discover_forum_worker(
             discover_today_threads(
                 page,
                 forum_url,
-                max_pages=(1 if getattr(settings, 'latest_page_only', False) else settings.max_pages_per_forum),
-                only_today=(False if (getattr(settings, 'full_site_mode', False) or getattr(settings, 'latest_page_only', False)) else settings.only_today),
-                max_age_hours=(settings.max_age_hours if not (getattr(settings, 'full_site_mode', False) or getattr(settings, 'latest_page_only', False)) else 24 * 365 * 100),
+                max_pages=(1 if settings.latest_page_only else settings.max_pages_per_forum),
+                only_today=(False if (settings.full_site_mode or settings.latest_page_only) else settings.only_today),
+                max_age_hours=(settings.max_age_hours if not (settings.full_site_mode or settings.latest_page_only) else 24 * 365 * 100),
                 sort_query=settings.forum_sort_query,
-                cursor_iso=(None if getattr(settings, 'latest_page_only', False) else cursor_iso),
+                cursor_iso=(None if settings.latest_page_only else cursor_iso),
             )
         )
         return _DiscoverOutcome(forum_url=forum_url, threads=threads)
@@ -135,32 +170,32 @@ def _discover_forum_worker(
         stop_browser(session)
 
 
-def _is_china_related(*parts: str) -> bool:
-    haystack = "\n".join([(p or "") for p in parts]).lower()
-    return any(keyword.lower() in haystack for keyword in _CHINA_KEYWORDS)
-
-
-class _Tee:
-    def __init__(self, *streams):
-        self._streams = streams
-
-    def write(self, s: str) -> int:
-        for st in self._streams:
-            st.write(s)
-        return len(s)
-
-    def flush(self) -> None:
-        for st in self._streams:
-            st.flush()
-
-    def isatty(self) -> bool:
-        for st in self._streams:
-            try:
-                if st.isatty():
-                    return True
-            except Exception:
-                continue
-        return False
+def _translate_for_dingtalk(
+    translator: OpenAICompatTranslator | None,
+    settings: Settings,
+    title: str,
+    text: str,
+) -> tuple[str, str, str | None]:
+    send_title = title[:128]
+    send_text = text
+    if translator is None:
+        return send_title, send_text, None
+    try:
+        send_title = translator.translate_title_to_zh(title)[:128]
+        send_text = translator.translate_markdown_to_zh(text)
+        return send_title, send_text, None
+    except Exception as e:
+        err = repr(e)
+        fallback_title = f"[翻译失败] {title}"[:128]
+        fallback_text = (
+            "## 翻译失败\n"
+            "模型请求失败，已回退发送原文。\n\n"
+            f"- 模型: `{translator.model_name}`\n"
+            f"- 原因: `{err}`\n\n"
+            "---\n\n"
+            f"{text}"
+        )
+        return fallback_title, fallback_text, err
 
 
 def _deliver_to_feishu(conn, settings: Settings) -> None:
@@ -174,7 +209,6 @@ def _deliver_to_feishu(conn, settings: Settings) -> None:
     )
     client = FeishuClient(cfg)
 
-    remaining = 0
     try:
         remaining = conn.execute(
             """
@@ -196,6 +230,7 @@ def _deliver_to_feishu(conn, settings: Settings) -> None:
     if remaining <= 0:
         print(f"[feishu] summary limit={max_success} attempted=0 delivered=0 failed=0 remaining=0")
         return
+
     for row in iter_undelivered_posts(conn, provider="feishu", limit=fetch_limit):
         if delivered >= max_success:
             break
@@ -228,15 +263,13 @@ def _deliver_to_feishu(conn, settings: Settings) -> None:
             content.append([{"tag": "text", "text": "下载链接:"}])
             for u in download_urls[:20]:
                 if isinstance(u, str) and u.strip():
-                    content.append([
-                        {"tag": "a", "text": u.strip()[:120], "href": u.strip()},
-                    ])
+                    content.append([{"tag": "a", "text": u.strip()[:120], "href": u.strip()}])
 
         if first_post_text:
             excerpt = first_post_text.strip()
             if len(excerpt) > 1200:
                 excerpt = excerpt[:1200] + "..."
-            content.append([{"tag": "text", "text": f"\n1楼内容摘要:\n{excerpt}"}])
+            content.append([{"tag": "text", "text": f"\n首楼内容摘要:\n{excerpt}"}])
 
         if screenshot_path:
             try:
@@ -249,7 +282,13 @@ def _deliver_to_feishu(conn, settings: Settings) -> None:
 
         try:
             message_id = client.send_post_message(cfg.chat_id, title=title, content=content)
-            mark_delivered(conn, post_url=post_url, provider="feishu", delivered_at=datetime.utcnow().isoformat(), message_id=message_id)
+            mark_delivered(
+                conn,
+                post_url=post_url,
+                provider="feishu",
+                delivered_at=datetime.utcnow().isoformat(),
+                message_id=message_id,
+            )
             delivered += 1
             print(f"[feishu] delivered: {post_url}")
         except Exception as e:
@@ -267,14 +306,11 @@ def _deliver_to_feishu(conn, settings: Settings) -> None:
             """
         ).fetchone()[0]
     except Exception:
-        remaining = remaining
+        pass
 
-    if attempted or delivered or failed:
-        print(
-            f"[feishu] summary limit={max_success} attempted={attempted} delivered={delivered} failed={failed} remaining={remaining}"
-        )
-    else:
-        print(f"[feishu] summary limit={max_success} attempted=0 delivered=0 failed=0 remaining={remaining}")
+    print(
+        f"[feishu] summary limit={max_success} attempted={attempted} delivered={delivered} failed={failed} remaining={remaining}"
+    )
 
 
 def _deliver_to_dingtalk(conn, settings: Settings) -> None:
@@ -284,17 +320,16 @@ def _deliver_to_dingtalk(conn, settings: Settings) -> None:
     cfg = DingTalkConfig(webhook=settings.dingtalk_webhook, secret=(settings.dingtalk_secret or None))
     client = DingTalkClient(cfg)
     translator = None
-    if settings.mimo_api_key:
-        translator = MimoTranslator(
-            MimoConfig(
-                base_url=settings.mimo_base_url,
-                api_key=settings.mimo_api_key,
-                model=settings.mimo_model,
-                proxy_server=settings.mimo_proxy_server,
+    if settings.llm_api_key:
+        translator = OpenAICompatTranslator(
+            OpenAICompatConfig(
+                base_url=settings.llm_base_url,
+                api_key=settings.llm_api_key,
+                model=settings.llm_model,
+                proxy_server=settings.llm_proxy_server,
             )
         )
 
-    remaining = 0
     try:
         remaining = conn.execute(
             """
@@ -349,10 +384,10 @@ def _deliver_to_dingtalk(conn, settings: Settings) -> None:
             print(f"[dingtalk] filtered_non_china: {post_url}")
             continue
 
-        # Build markdown
-        parts: list[str] = []
-        link_title = f"[{title}]({post_url})"
-        parts.append(link_title)
+        parts: list[str] = [f"[{title}]({post_url})"]
+        if _is_chongqing_related(post_url, title, first_post_text):
+            parts.append("## 重庆相关重点提示\n该条内容命中了重庆相关关键词，请优先关注。")
+
         meta_line = []
         if author_name:
             meta_line.append(f"作者: {author_name}")
@@ -360,30 +395,35 @@ def _deliver_to_dingtalk(conn, settings: Settings) -> None:
             meta_line.append(f"时间: {created_at}")
         if meta_line:
             parts.append("\n" + "    ".join(meta_line))
+
         if download_urls:
             parts.append("\n下载链接:")
             for u in download_urls[:20]:
                 if isinstance(u, str) and u.strip():
                     parts.append(f"- {u.strip()}")
+
         if first_post_text:
             excerpt = first_post_text.strip()
             if len(excerpt) > 800:
                 excerpt = excerpt[:800] + "..."
-            parts.append("\n> 1楼内容摘要:\n> " + excerpt.replace("\n", "\n> "))
+            parts.append("\n> 首楼内容摘要:\n> " + excerpt.replace("\n", "\n> "))
 
-        text = "\n".join(parts)
-        send_title = title[:128]
-        send_text = text
-        if translator is not None:
-            try:
-                send_title = translator.translate_title_to_zh(title)[:128]
-                send_text = translator.translate_markdown_to_zh(text)
-            except Exception as e:
-                print(f"[dingtalk] translate_failed fallback_original: {post_url} -> {repr(e)}")
+        raw_text = "\n".join(parts)
+        send_title, send_text, translate_error = _translate_for_dingtalk(translator, settings, title, raw_text)
+        if translate_error:
+            print(f"[dingtalk] translate_failed fallback_original: {post_url} -> {translate_error}")
+        elif _is_chongqing_related(post_url, title, first_post_text):
+            send_title = f"[重庆相关] {send_title}"[:128]
 
         try:
             client.send_markdown(title=send_title, text=send_text)
-            mark_delivered(conn, post_url=post_url, provider="dingtalk", delivered_at=datetime.utcnow().isoformat(), message_id=None)
+            mark_delivered(
+                conn,
+                post_url=post_url,
+                provider="dingtalk",
+                delivered_at=datetime.utcnow().isoformat(),
+                message_id=None,
+            )
             delivered += 1
             print(f"[dingtalk] delivered: {post_url}")
         except Exception as e:
@@ -391,7 +431,6 @@ def _deliver_to_dingtalk(conn, settings: Settings) -> None:
             print(f"[dingtalk] failed: {post_url} -> {repr(e)}")
             continue
 
-        # Try send image after markdown if exists
         if screenshot_path:
             try:
                 abs_path = (settings.data_dir / str(screenshot_path)).resolve()
@@ -415,14 +454,11 @@ def _deliver_to_dingtalk(conn, settings: Settings) -> None:
             """
         ).fetchone()[0]
     except Exception:
-        remaining = remaining
+        pass
 
-    if attempted or delivered or failed:
-        print(
-            f"[dingtalk] summary limit={max_success} attempted={attempted} delivered={delivered} failed={failed} filtered={filtered} remaining={remaining}"
-        )
-    else:
-        print(f"[dingtalk] summary limit={max_success} attempted=0 delivered=0 failed=0 filtered={filtered} remaining={remaining}")
+    print(
+        f"[dingtalk] summary limit={max_success} attempted={attempted} delivered={delivered} failed={failed} filtered={filtered} remaining={remaining}"
+    )
 
 
 def run_daily(settings: Settings, project_root: Path) -> None:
@@ -439,7 +475,6 @@ def run_daily(settings: Settings, project_root: Path) -> None:
 
     db_path = settings.data_dir / "db.sqlite"
     storage_state_path = settings.data_dir / "storage_state.json"
-
     conn = open_db(db_path)
 
     session = start_browser(
@@ -456,12 +491,12 @@ def run_daily(settings: Settings, project_root: Path) -> None:
 
         if settings.forum_urls:
             print(f"[2/4] Discovering threads from {len(settings.forum_urls)} forum(s)...")
-            if getattr(settings, 'latest_page_only', False):
+            if settings.latest_page_only:
                 print(f"[2/4] latest_page_only enabled: each forum will fetch only the newest 1 page using sort_query={settings.forum_sort_query!r}")
             discovered = 0
             inserted = 0
             sample_urls: list[str] = []
-            discover_workers = min(max(1, int(getattr(settings, "scrape_workers", 1))), len(settings.forum_urls))
+            discover_workers = min(max(1, int(settings.scrape_workers)), len(settings.forum_urls))
             print(f"[2/4] discover_workers={discover_workers}")
             cursor_map = {forum_url: get_cursor(conn, f"forum:{forum_url}") for forum_url in settings.forum_urls}
             with ThreadPoolExecutor(max_workers=discover_workers) as executor:
@@ -482,9 +517,8 @@ def run_daily(settings: Settings, project_root: Path) -> None:
                         if upsert_discovered(conn, th.url, th.discovered_at, th.started_at):
                             inserted += 1
                         discovered += 1
-                        if th.started_at:
-                            if (max_started_at is None) or (th.started_at > max_started_at):
-                                max_started_at = th.started_at
+                        if th.started_at and ((max_started_at is None) or (th.started_at > max_started_at)):
+                            max_started_at = th.started_at
                     if max_started_at:
                         set_cursor(conn, f"forum:{forum_url}", max_started_at)
             print("[2/4] Discovery done.")
@@ -509,8 +543,10 @@ def run_daily(settings: Settings, project_root: Path) -> None:
         else:
             fetch_limit = 100_000
             max_browser_check_skips = 10_000
+
         seen_canonical: set[str] = set()
         cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=int(settings.max_age_hours))
+
         def _parse_localized_dt(s: str) -> datetime | None:
             if not s:
                 return None
@@ -544,15 +580,15 @@ def run_daily(settings: Settings, project_root: Path) -> None:
                 if url in seen_canonical:
                     continue
                 seen_canonical.add(url)
-
                 if has_post(conn, url):
                     continue
-                # Hard cutoff pre-check using discovery-time started_at stored in threads.created_at
+
                 try:
                     created_iso = get_thread_created_at(conn, url)
                 except Exception:
                     created_iso = None
-                if created_iso and not (getattr(settings, 'full_site_mode', False) or getattr(settings, 'latest_page_only', False)):
+
+                if created_iso and not (settings.full_site_mode or settings.latest_page_only):
                     try:
                         dt0 = datetime.fromisoformat(created_iso.replace("Z", "+00:00"))
                         if dt0 < cutoff_dt:
@@ -564,13 +600,13 @@ def run_daily(settings: Settings, project_root: Path) -> None:
                             continue
                     except Exception:
                         pass
+
                 mark_processing(conn, url)
                 base_may_reply = not has_reply(conn, url)
                 allow_reply = False
-                if getattr(settings, 'full_site_mode', False):
+                if settings.full_site_mode:
                     allow_reply = False
-                elif getattr(settings, 'latest_page_only', False):
-                    # In latest-page-only mode, always allow reply (no time cutoff gating)
+                elif settings.latest_page_only:
                     allow_reply = base_may_reply
                 elif created_iso:
                     try:
@@ -578,15 +614,12 @@ def run_daily(settings: Settings, project_root: Path) -> None:
                         allow_reply = dt0 >= cutoff_dt and base_may_reply
                     except Exception:
                         allow_reply = False
+
                 pending_tasks.append(
                     _PendingThread(
                         url=url,
-                        may_reply=(False if getattr(settings, 'full_site_mode', False) else allow_reply),
-                        created_at_cutoff_iso=(
-                            None
-                            if (getattr(settings, 'full_site_mode', False) or getattr(settings, 'latest_page_only', False))
-                            else cutoff_dt.isoformat()
-                        ),
+                        may_reply=(False if settings.full_site_mode else allow_reply),
+                        created_at_cutoff_iso=(None if (settings.full_site_mode or settings.latest_page_only) else cutoff_dt.isoformat()),
                     )
                 )
             except Exception as e:
@@ -599,15 +632,10 @@ def run_daily(settings: Settings, project_root: Path) -> None:
                 break
 
         if pending_tasks:
-            worker_count = max(1, int(getattr(settings, "scrape_workers", 1)))
-            worker_count = min(worker_count, len(pending_tasks))
+            worker_count = min(max(1, int(settings.scrape_workers)), len(pending_tasks))
             print(f"[3/4] queued={len(pending_tasks)} scrape_workers={worker_count}")
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                future_map = {}
-                for task in pending_tasks:
-                    future = executor.submit(_scrape_thread_worker, settings, storage_state_path, task)
-                    future_map[future] = task.url
-
+                future_map = {executor.submit(_scrape_thread_worker, settings, storage_state_path, task): task.url for task in pending_tasks}
                 for future in as_completed(future_map):
                     url = future_map[future]
                     try:
@@ -646,10 +674,9 @@ def run_daily(settings: Settings, project_root: Path) -> None:
                     author_name = (result.author_name or "").strip()
                     first_post_text = (result.first_post_text or "").strip()
                     download_urls = tuple(u.strip() for u in (result.download_urls or ()) if u and u.strip())
-
                     print(f"[meta] created_at={created_at or '(missing)'} url={url}")
 
-                    if not (getattr(settings, 'full_site_mode', False) or getattr(settings, 'latest_page_only', False)):
+                    if not (settings.full_site_mode or settings.latest_page_only):
                         parsed_dt = _parse_localized_dt(created_at)
                         if parsed_dt is None:
                             mark_failed(conn, url, "created_at_unparseable")
@@ -666,7 +693,7 @@ def run_daily(settings: Settings, project_root: Path) -> None:
                             charged += 1
                             continue
 
-                    if getattr(result, 'did_reply', False):
+                    if result.did_reply:
                         try:
                             mark_replied(conn, url, result.fetched_at)
                         except Exception:
@@ -700,14 +727,13 @@ def run_daily(settings: Settings, project_root: Path) -> None:
                     if settings.max_threads_per_day > 0 and charged >= settings.max_threads_per_day:
                         break
 
-        # Deliver notifications
-        if getattr(settings, 'dingtalk_enabled', False):
+        if settings.dingtalk_enabled:
             print("[4/4] Delivering to DingTalk...")
             try:
                 _deliver_to_dingtalk(conn, settings)
             except Exception as e:
                 print(f"[dingtalk] deliver step failed -> {repr(e)}")
-        elif getattr(settings, 'feishu_enabled', False):
+        elif settings.feishu_enabled:
             print("[4/4] Delivering to Feishu...")
             try:
                 _deliver_to_feishu(conn, settings)
@@ -724,20 +750,9 @@ def run_daily(settings: Settings, project_root: Path) -> None:
             posts_total = conn.execute("SELECT COUNT(*) FROM posts").fetchone()[0]
             print(
                 "[run] processed=%d charged=%d skipped_browser_check=%d ok=%d failed=%d download_urls=%d downloads_new=%d"
-                % (
-                    processed,
-                    charged,
-                    skipped_browser_check,
-                    ok_threads,
-                    failed_threads,
-                    total_download_urls,
-                    inserted_download_rows,
-                )
+                % (processed, charged, skipped_browser_check, ok_threads, failed_threads, total_download_urls, inserted_download_rows)
             )
-            print(
-                "[db] threads_total=%d posts_total=%d pending=%d"
-                % (threads_total, posts_total, pending)
-            )
+            print("[db] threads_total=%d posts_total=%d pending=%d" % (threads_total, posts_total, pending))
         except Exception:
             pass
 
@@ -754,7 +769,6 @@ def run_daily(settings: Settings, project_root: Path) -> None:
                 print(f"[db] pruned_old_threads={pruned}")
         except Exception:
             pass
-
     finally:
         stop_browser(session)
         conn.close()

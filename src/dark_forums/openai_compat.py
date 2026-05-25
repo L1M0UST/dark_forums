@@ -8,18 +8,22 @@ from requests.exceptions import SSLError
 
 
 @dataclass(frozen=True)
-class MimoConfig:
+class OpenAICompatConfig:
     base_url: str
     api_key: str
     model: str
     proxy_server: str = ""
 
 
-class MimoTranslator:
-    def __init__(self, cfg: MimoConfig) -> None:
+class OpenAICompatTranslator:
+    def __init__(self, cfg: OpenAICompatConfig) -> None:
         self._cfg = cfg
 
-    def _chat(self, system_prompt: str, user_prompt: str) -> str:
+    @property
+    def model_name(self) -> str:
+        return self._cfg.model
+
+    def _post_chat(self, system_prompt: str, user_prompt: str) -> str:
         url = f"{self._cfg.base_url}/chat/completions"
         payload = json.dumps(
             {
@@ -38,6 +42,7 @@ class MimoTranslator:
                 "http": self._cfg.proxy_server,
                 "https": self._cfg.proxy_server,
             }
+
         request_kwargs = {
             "headers": {
                 "Authorization": f"Bearer {self._cfg.api_key}",
@@ -62,30 +67,32 @@ class MimoTranslator:
                 break
             except SSLError as exc:
                 last_exc = exc
-                continue
             except Exception as exc:
                 last_exc = exc
-                continue
         if resp is None:
-            raise RuntimeError(f"mimo_translate_request_failed: {repr(last_exc)}")
-        resp.raise_for_status()
+            raise RuntimeError(f"openai_compat_request_failed: {repr(last_exc)}")
+
+        if resp.status_code >= 400:
+            body = resp.text[:500]
+            raise RuntimeError(f"openai_compat_http_{resp.status_code}: {body}")
+
         data = resp.json()
         try:
             content = data["choices"][0]["message"]["content"]
         except Exception as exc:
-            raise RuntimeError(f"mimo_translate_bad_response: {data}") from exc
+            raise RuntimeError(f"openai_compat_bad_response: {data}") from exc
         if not isinstance(content, str) or not content.strip():
-            raise RuntimeError(f"mimo_translate_empty_response: {data}")
+            raise RuntimeError(f"openai_compat_empty_response: {data}")
         return content.strip()
 
     def translate_title_to_zh(self, title: str) -> str:
-        return self._chat(
-            "Translate the input title into concise Simplified Chinese. Keep technical terms, counts, organization names, IDs, and URLs accurate. Output only the translated title.",
+        return self._post_chat(
+            "Translate the input title into concise Simplified Chinese. Keep technical terms, organization names, counts, IDs, and URLs accurate. Output only the translated title.",
             title,
         )
 
-    def translate_markdown_to_zh(self, text: str) -> str:
-        return self._chat(
-            "Translate the input markdown into Simplified Chinese. Preserve markdown structure, links, URLs, list markers, blockquotes, and code-like fragments. Translate natural language only. Output only the translated markdown.",
-            text,
+    def translate_markdown_to_zh(self, markdown_text: str) -> str:
+        return self._post_chat(
+            "Translate the input markdown into clear, easy-to-understand Simplified Chinese. Preserve markdown structure, raw URLs, links, list markers, and blockquotes. Translate natural language only and output only the translated markdown.",
+            markdown_text,
         )

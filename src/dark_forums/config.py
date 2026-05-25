@@ -7,6 +7,15 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
+def _first_nonempty(*values: str) -> str:
+    for value in values:
+        if value is not None:
+            v = str(value).strip()
+            if v:
+                return v
+    return ""
+
+
 @dataclass(frozen=True)
 class Settings:
     base_url: str
@@ -34,10 +43,10 @@ class Settings:
     dingtalk_webhook: str
     dingtalk_secret: str
     dingtalk_max_posts_per_run: int
-    mimo_base_url: str
-    mimo_api_key: str
-    mimo_model: str
-    mimo_proxy_server: str
+    llm_base_url: str
+    llm_api_key: str
+    llm_model: str
+    llm_proxy_server: str
     data_dir: Path
     logs_dir: Path
 
@@ -88,10 +97,25 @@ def load_settings(project_root: Path) -> Settings:
     dingtalk_secret = os.getenv("DINGTALK_SECRET", "").strip()
     # default fallback to FEISHU_MAX_POSTS_PER_RUN if present to keep similar behavior
     dingtalk_max_posts_per_run = int(os.getenv("DINGTALK_MAX_POSTS_PER_RUN", os.getenv("FEISHU_MAX_POSTS_PER_RUN", "20")).strip())
-    mimo_base_url = os.getenv("MIMO_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1").strip().rstrip("/")
-    mimo_api_key = os.getenv("MIMO_API_KEY", "").strip()
-    mimo_model = os.getenv("MIMO_MODEL", "mimo-v2.5-pro").strip()
-    mimo_proxy_server = os.getenv("MIMO_PROXY_SERVER", proxy_server).strip()
+    llm_base_url = _first_nonempty(
+        os.getenv("OPENAI_COMPAT_BASE_URL"),
+        os.getenv("MIMO_BASE_URL"),
+        "https://token-plan-cn.xiaomimimo.com/v1",
+    ).rstrip("/")
+    llm_api_key = _first_nonempty(
+        os.getenv("OPENAI_COMPAT_API_KEY"),
+        os.getenv("MIMO_API_KEY"),
+    )
+    llm_model = _first_nonempty(
+        os.getenv("OPENAI_COMPAT_MODEL"),
+        os.getenv("MIMO_MODEL"),
+        "mimo-v2.5-pro",
+    )
+    llm_proxy_server = _first_nonempty(
+        os.getenv("OPENAI_COMPAT_PROXY_SERVER"),
+        os.getenv("MIMO_PROXY_SERVER"),
+        proxy_server,
+    )
 
     if dingtalk_enabled and not dingtalk_webhook:
         raise ValueError("DingTalk enabled but DINGTALK_WEBHOOK not set")
@@ -140,10 +164,10 @@ def load_settings(project_root: Path) -> Settings:
         dingtalk_webhook=dingtalk_webhook,
         dingtalk_secret=dingtalk_secret,
         dingtalk_max_posts_per_run=dingtalk_max_posts_per_run,
-        mimo_base_url=mimo_base_url,
-        mimo_api_key=mimo_api_key,
-        mimo_model=mimo_model,
-        mimo_proxy_server=mimo_proxy_server,
+        llm_base_url=llm_base_url,
+        llm_api_key=llm_api_key,
+        llm_model=llm_model,
+        llm_proxy_server=llm_proxy_server,
         data_dir=data_dir,
         logs_dir=logs_dir,
     )
