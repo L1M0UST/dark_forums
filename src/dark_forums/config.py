@@ -46,6 +46,7 @@ class Settings:
     llm_base_url: str
     llm_api_key: str
     llm_model: str
+    llm_use_proxy: bool
     llm_proxy_server: str
     data_dir: Path
     logs_dir: Path
@@ -111,6 +112,11 @@ def load_settings(project_root: Path) -> Settings:
         os.getenv("MIMO_MODEL"),
         "mimo-v2.5-pro",
     )
+    llm_use_proxy = _first_nonempty(
+        os.getenv("OPENAI_COMPAT_USE_PROXY"),
+        os.getenv("MIMO_USE_PROXY"),
+        "1",
+    ).strip() not in {"0", "false", "False", ""}
     llm_proxy_server = _first_nonempty(
         os.getenv("OPENAI_COMPAT_PROXY_SERVER"),
         os.getenv("MIMO_PROXY_SERVER"),
@@ -167,6 +173,7 @@ def load_settings(project_root: Path) -> Settings:
         llm_base_url=llm_base_url,
         llm_api_key=llm_api_key,
         llm_model=llm_model,
+        llm_use_proxy=llm_use_proxy,
         llm_proxy_server=llm_proxy_server,
         data_dir=data_dir,
         logs_dir=logs_dir,

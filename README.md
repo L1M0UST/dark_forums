@@ -79,6 +79,7 @@ python -m playwright install chromium
 - `DARKFORUMS_SCRAPE_WORKERS`：并发 worker 数，既用于发现阶段，也用于帖子内容抓取阶段
 - `DINGTALK_ENABLED` / `DINGTALK_WEBHOOK` / `DINGTALK_SECRET`
 - `OPENAI_COMPAT_BASE_URL` / `OPENAI_COMPAT_API_KEY` / `OPENAI_COMPAT_MODEL` / `OPENAI_COMPAT_PROXY_SERVER`
+- `OPENAI_COMPAT_USE_PROXY`：是否让翻译模型请求走代理，`1` 为启用，`0` 为关闭
 - `MIMO_BASE_URL` / `MIMO_API_KEY` / `MIMO_MODEL` / `MIMO_PROXY_SERVER`
 说明：`MIMO_*` 目前作为向后兼容别名保留，优先推荐使用 `OPENAI_COMPAT_*`
 - `FEISHU_ENABLED` / `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `FEISHU_CHAT_ID`
@@ -168,7 +169,8 @@ Start in: E:\code\py\dark_forums
 - 同一个 worker 数同时用于 forum 发现并发和帖子抓取并发
 - `full_site_mode` 会显著增加抓取量，建议谨慎开启
 - 如果浏览器拉起受限，优先在正常本地 shell 中运行
-- OpenAI 兼容翻译在这台机器上优先走 `OPENAI_COMPAT_PROXY_SERVER` 或 `MIMO_PROXY_SERVER` 更稳定
+- OpenAI 兼容翻译可以通过 `OPENAI_COMPAT_USE_PROXY=1/0` 独立控制是否走代理
+- 在这台机器上，翻译模型通常走 `OPENAI_COMPAT_PROXY_SERVER` 或 `MIMO_PROXY_SERVER` 更稳定
 
 ## 安全说明
 
