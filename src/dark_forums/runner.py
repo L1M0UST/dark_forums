@@ -213,6 +213,65 @@ def _looks_like_translation_refusal(text: str) -> bool:
     return any(pattern in haystack for pattern in _TRANSLATION_REFUSAL_PATTERNS)
 
 
+def _clean_translated_notification_text(text: str, *, original_title: str, translated_title: str, chongqing_related: bool) -> str:
+    lines = [(line or "").strip() for line in (text or "").replace("\r", "").splitlines()]
+    lines = [line for line in lines if line]
+
+    start_idx = 0
+    field_markers = (
+        "帖子链接:",
+        "post link:",
+        "作者:",
+        "author:",
+        "时间:",
+        "time:",
+        "下载链接:",
+        "download link:",
+        "首楼摘要:",
+        "summary:",
+        "提示:",
+        "note:",
+    )
+    for idx, line in enumerate(lines):
+        low = line.lower()
+        if low.startswith(field_markers):
+            start_idx = idx
+            break
+    cleaned = lines[start_idx:] if lines else []
+
+    filtered: list[str] = []
+    for line in cleaned:
+        low = line.lower()
+        if line == original_title or line == translated_title:
+            continue
+        if low.startswith("the title mentions "):
+            continue
+        if low.startswith("the post link "):
+            continue
+        if low.startswith("there's a hint "):
+            continue
+        if low.startswith("the summary mentions "):
+            continue
+        if low.startswith("this appears to be "):
+            continue
+        if low.startswith("the user wants me "):
+            continue
+        if low.startswith("let me translate "):
+            continue
+        if low.startswith("提示:") or low.startswith("note:"):
+            continue
+        filtered.append(line)
+
+    body = "\n".join(filtered).strip()
+    if chongqing_related:
+        highlight = "## 重庆相关重点提示\n该条内容命中了重庆相关关键词，请优先关注。"
+        if body:
+            body = f"{highlight}\n\n{body}"
+        else:
+            body = highlight
+    return body
+
+
 def _build_dingtalk_raw_markdown(
     *,
     post_url: str,
@@ -344,10 +403,14 @@ def _translate_for_dingtalk(
     title: str,
     model_input_text: str,
     raw_fallback_text: str,
+    *,
+    chongqing_related: bool,
 ) -> tuple[str, str, str | None]:
     send_title = title[:128]
     send_text = raw_fallback_text
     if translator is None:
+        if chongqing_related and "## 重庆相关重点提示" not in send_text:
+            send_text = "## 重庆相关重点提示\n该条内容命中了重庆相关关键词，请优先关注。\n\n" + send_text
         return send_title, send_text, None
     try:
         translated_title = translator.translate_title_to_zh(title).strip()
@@ -357,7 +420,14 @@ def _translate_for_dingtalk(
         if _looks_like_translation_refusal(translated_text):
             raise RuntimeError(f"正文翻译疑似拒答：{translated_text}")
         send_title = translated_title[:128]
-        send_text = translated_text
+        send_text = _clean_translated_notification_text(
+            translated_text,
+            original_title=title,
+            translated_title=send_title,
+            chongqing_related=chongqing_related,
+        )
+        if not send_text.strip():
+            raise RuntimeError(f"正文翻译清洗后为空：{translated_text}")
         return send_title, send_text, None
     except Exception as e:
         err = repr(e)
@@ -368,7 +438,7 @@ def _translate_for_dingtalk(
             f"- 模型: `{translator.model_name}`\n"
             f"- 原因: `{err}`\n\n"
             "---\n\n"
-            f"{raw_fallback_text}"
+            f"{('## 重庆相关重点提示\\n该条内容命中了重庆相关关键词，请优先关注。\\n\\n' if chongqing_related and '## 重庆相关重点提示' not in raw_fallback_text else '')}{raw_fallback_text}"
         )
         return fallback_title, fallback_text, err
 
@@ -583,6 +653,7 @@ def _deliver_to_dingtalk(conn, settings: Settings) -> None:
             title,
             model_input_text,
             raw_text,
+            chongqing_related=chongqing_related,
         )
         if translate_error:
             print(f"[dingtalk] translate_failed fallback_original: {post_url} -> {translate_error}")

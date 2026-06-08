@@ -104,12 +104,12 @@ class OpenAICompatTranslator:
 
     def translate_title_to_zh(self, title: str) -> str:
         return self._post_chat(
-            "Translate the input title into concise Simplified Chinese. Keep technical terms, organization names, counts, IDs, and URLs accurate. Output only the translated title.",
+            "Translate the input title into concise Simplified Chinese. Keep technical terms, organization names, counts, IDs, and URLs accurate. Output only the translated title. Do not explain. Do not add notes. Do not add any preamble or analysis.",
             title,
         )
 
     def translate_markdown_to_zh(self, markdown_text: str) -> str:
         return self._post_chat(
-            "Translate the input markdown into clear, easy-to-understand Simplified Chinese. Preserve markdown structure, raw URLs, links, list markers, and blockquotes. Translate natural language only and output only the translated markdown.",
+            "Translate the input markdown into clear, easy-to-understand Simplified Chinese. Preserve markdown structure, raw URLs, links, list markers, and blockquotes. Translate natural language only and output only the translated markdown. Do not explain. Do not add notes. Do not add any preamble, analysis, or commentary.",
             markdown_text,
         )
