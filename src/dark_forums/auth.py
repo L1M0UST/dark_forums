@@ -70,9 +70,10 @@ def login(page: Page, base_url: str, username: str, password: str) -> None:
     login_url = urljoin(base_url, "/member.php?action=login")
     try:
         page.goto(login_url, wait_until="domcontentloaded", timeout=90_000)
-    except Exception:
+    except Exception as e:
         _dump_debug(page, "login_goto_failed")
-        raise
+        print(f"[登录] 打开登录页失败，可能是网络不通或代理异常：url={login_url}，错误={repr(e)}")
+        raise RuntimeError(f"打开登录页失败：{repr(e)}") from e
 
     # Sometimes the site serves an anti-bot interstitial instead of the login form.
     for attempt in range(3):
@@ -80,16 +81,17 @@ def login(page: Page, base_url: str, username: str, password: str) -> None:
         if not _is_browser_check(html):
             break
         _dump_debug(page, f"login_browser_check_{attempt}")
+        print(f"[登录] 命中浏览器验证页，正在尝试第 {attempt + 1} 次绕过。")
         if _try_bypass_browser_check(page):
             break
         page.wait_for_timeout(5_000)
     else:
-        raise RuntimeError("Login blocked by browser_check")
+        raise RuntimeError("登录失败：命中浏览器验证页且自动绕过失败")
 
     html = page.content()
     if _is_captcha_challenge(html):
         _dump_debug(page, "login_captcha_challenge")
-        raise RuntimeError("Login blocked by captcha challenge")
+        raise RuntimeError("登录失败：命中验证码挑战页")
 
     if is_logged_in(page):
         return
@@ -126,8 +128,8 @@ def login(page: Page, base_url: str, username: str, password: str) -> None:
         _dump_debug(page, "login_username_not_found")
         html = page.content()
         if _is_captcha_challenge(html):
-            raise RuntimeError("Login blocked by captcha challenge")
-        raise RuntimeError("Login page: username input not found")
+            raise RuntimeError("登录失败：命中验证码挑战页")
+        raise RuntimeError("登录失败：未找到用户名输入框")
 
     pass_filled = False
     pass_input = None
@@ -143,8 +145,8 @@ def login(page: Page, base_url: str, username: str, password: str) -> None:
         _dump_debug(page, "login_password_not_found")
         html = page.content()
         if _is_captcha_challenge(html):
-            raise RuntimeError("Login blocked by captcha challenge")
-        raise RuntimeError("Login page: password input not found")
+            raise RuntimeError("登录失败：命中验证码挑战页")
+        raise RuntimeError("登录失败：未找到密码输入框")
 
     login_form = None
     if user_input is not None:
@@ -186,15 +188,16 @@ def login(page: Page, base_url: str, username: str, password: str) -> None:
 
     if not clicked:
         _dump_debug(page, "login_submit_not_found")
-        raise RuntimeError("Login page: submit button not found")
+        raise RuntimeError("登录失败：未找到登录提交按钮")
 
     page.wait_for_timeout(500)
 
     try:
         page.wait_for_load_state("domcontentloaded", timeout=90_000)
-    except Exception:
+    except Exception as e:
         _dump_debug(page, "login_wait_domcontentloaded_failed")
-        raise
+        print(f"[登录] 提交登录后等待页面加载失败，可能是网络不稳定：错误={repr(e)}")
+        raise RuntimeError(f"登录后等待页面加载失败：{repr(e)}") from e
 
     try:
         page.wait_for_url("**/member.php?action=login", timeout=2_000)
@@ -203,7 +206,7 @@ def login(page: Page, base_url: str, username: str, password: str) -> None:
 
     if not is_logged_in(page):
         _dump_debug(page, "login_failed")
-        raise RuntimeError("Login failed: did not detect logged-in state")
+        raise RuntimeError("登录失败：未检测到已登录状态")
 
 
 def _dump_debug(page: Page, name: str) -> None:

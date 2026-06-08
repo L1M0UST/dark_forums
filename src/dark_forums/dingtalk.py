@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import urlencode, urlparse, parse_qs, urlunparse
 
 import requests
+from requests import RequestException
 
 
 @dataclass
@@ -49,11 +50,16 @@ class DingTalkClient:
                 "text": text,
             },
         }
-        resp = requests.post(url, headers={"Content-Type": "application/json"}, data=json.dumps(payload), timeout=20)
-        resp.raise_for_status()
-        data = resp.json()
+        try:
+            resp = requests.post(url, headers={"Content-Type": "application/json"}, data=json.dumps(payload), timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+        except RequestException as e:
+            raise RuntimeError(f"钉钉 markdown 推送失败，可能是网络不通：{repr(e)}") from e
+        except ValueError as e:
+            raise RuntimeError(f"钉钉 markdown 返回解析失败：{repr(e)}") from e
         if int(data.get("errcode", 0)) != 0:
-            raise RuntimeError(f"dingtalk_send_failed: {data}")
+            raise RuntimeError(f"钉钉 markdown 推送失败，接口返回异常：{data}")
         return data
 
     def send_image(self, image_base64: str, md5_hex: str) -> dict[str, Any]:
@@ -65,11 +71,16 @@ class DingTalkClient:
                 "md5": md5_hex,
             },
         }
-        resp = requests.post(url, headers={"Content-Type": "application/json"}, data=json.dumps(payload), timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
+        try:
+            resp = requests.post(url, headers={"Content-Type": "application/json"}, data=json.dumps(payload), timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+        except RequestException as e:
+            raise RuntimeError(f"钉钉图片推送失败，可能是网络不通：{repr(e)}") from e
+        except ValueError as e:
+            raise RuntimeError(f"钉钉图片返回解析失败：{repr(e)}") from e
         if int(data.get("errcode", 0)) != 0:
-            raise RuntimeError(f"dingtalk_image_failed: {data}")
+            raise RuntimeError(f"钉钉图片推送失败，接口返回异常：{data}")
         return data
 
 

@@ -79,6 +79,7 @@ python -m playwright install chromium
 - `DARKFORUMS_SCRAPE_WORKERS`：并发 worker 数，既用于发现阶段，也用于帖子内容抓取阶段
 - `DINGTALK_ENABLED` / `DINGTALK_WEBHOOK` / `DINGTALK_SECRET`
 - `OPENAI_COMPAT_BASE_URL` / `OPENAI_COMPAT_API_KEY` / `OPENAI_COMPAT_MODEL` / `OPENAI_COMPAT_PROXY_SERVER`
+说明：当前默认推荐配置为 `https://api.minimaxi.com/v1` + `MiniMax-M2.7`
 - `OPENAI_COMPAT_USE_PROXY`：是否让翻译模型请求走代理，`1` 为启用，`0` 为关闭
 - `MIMO_BASE_URL` / `MIMO_API_KEY` / `MIMO_MODEL` / `MIMO_PROXY_SERVER`
 说明：`MIMO_*` 目前作为向后兼容别名保留，优先推荐使用 `OPENAI_COMPAT_*`
@@ -100,6 +101,21 @@ python run.py
 python -m dark_forums
 ```
 
+测试翻译与钉钉发送链路：
+
+```bash
+python -m dark_forums test-notify
+```
+
+该命令会一次性测试：
+
+- 翻译模型是否可用
+- 标题是否能单独翻译
+- 正文摘要是否能翻译
+- 钉钉 markdown 是否发送成功
+
+测试日志会写入 `logs/test_notify_YYYYMMDD_HHMMSS.log`。如果翻译失败，命令会继续尝试用回退内容发送钉钉，并把失败原因写进日志。
+
 ## 当前抓取逻辑
 
 - 每次优先访问配置好的 forum 列表页
@@ -116,8 +132,9 @@ python -m dark_forums
 - 仅推送与中国相关的内容
 - 关键词匹配范围包括中国、港澳台、四个直辖市、各省和一批重点城市
 - 发送前会调用 OpenAI 兼容大模型接口，把标题和 markdown 正文翻译为简体中文
-- 默认已接通 MiMo，可随时切换为其他 OpenAI 兼容模型服务
-- 如果翻译失败，会把失败原因写进钉钉消息，再附原文发送，避免静默失败
+- 当前默认推荐使用 MiniMax M3，可随时切换为其他 OpenAI 兼容模型服务
+- 翻译时不会把整段论坛原文全部扔给模型，而是先做本地清洗和结构化摘要，再翻译标题与摘要，降低风控拒答概率
+- 如果翻译失败、触发风控或出现拒答，会把失败原因写进钉钉消息，再回退发送本地整理后的原文内容，避免静默失败
 
 ### 飞书
 

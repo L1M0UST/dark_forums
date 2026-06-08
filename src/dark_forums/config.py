@@ -101,7 +101,7 @@ def load_settings(project_root: Path) -> Settings:
     llm_base_url = _first_nonempty(
         os.getenv("OPENAI_COMPAT_BASE_URL"),
         os.getenv("MIMO_BASE_URL"),
-        "https://token-plan-cn.xiaomimimo.com/v1",
+        "https://api.minimaxi.com/v1",
     ).rstrip("/")
     llm_api_key = _first_nonempty(
         os.getenv("OPENAI_COMPAT_API_KEY"),
@@ -110,7 +110,7 @@ def load_settings(project_root: Path) -> Settings:
     llm_model = _first_nonempty(
         os.getenv("OPENAI_COMPAT_MODEL"),
         os.getenv("MIMO_MODEL"),
-        "mimo-v2.5-pro",
+        "MiniMax-M2.7",
     )
     llm_use_proxy = _first_nonempty(
         os.getenv("OPENAI_COMPAT_USE_PROXY"),

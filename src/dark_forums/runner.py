@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -80,13 +81,52 @@ class _DiscoverOutcome:
 class _Tee:
     def __init__(self, *streams):
         self._streams = streams
+        self._buffer = ""
+
+    @staticmethod
+    def _safe_write_stream(st, text: str) -> None:
+        try:
+            st.write(text)
+            return
+        except UnicodeEncodeError:
+            pass
+
+        try:
+            enc = getattr(st, "encoding", None) or "utf-8"
+            safe_text = text.encode(enc, errors="replace").decode(enc, errors="replace")
+            st.write(safe_text)
+            return
+        except Exception:
+            pass
+
+        try:
+            st.write(text.encode("utf-8", errors="replace").decode("utf-8", errors="replace"))
+        except Exception:
+            pass
 
     def write(self, s: str) -> int:
-        for st in self._streams:
-            st.write(s)
+        if not s:
+            return 0
+        self._buffer += s
+        while True:
+            idx = self._buffer.find("\n")
+            if idx < 0:
+                break
+            line = self._buffer[:idx]
+            self._buffer = self._buffer[idx + 1 :]
+            prefix = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+            rendered = f"{prefix}{line}\n"
+            for st in self._streams:
+                self._safe_write_stream(st, rendered)
         return len(s)
 
     def flush(self) -> None:
+        if self._buffer:
+            prefix = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+            rendered = f"{prefix}{self._buffer}"
+            for st in self._streams:
+                self._safe_write_stream(st, rendered)
+            self._buffer = ""
         for st in self._streams:
             st.flush()
 
@@ -108,6 +148,135 @@ def _is_china_related(*parts: str) -> bool:
 def _is_chongqing_related(*parts: str) -> bool:
     haystack = "\n".join([(p or "") for p in parts]).lower()
     return any(keyword.lower() in haystack for keyword in _CHONGQING_KEYWORDS)
+
+
+_TRANSLATION_REFUSAL_PATTERNS = (
+    "i can't assist",
+    "i cannot assist",
+    "i’m sorry",
+    "i am sorry",
+    "sorry, i can't",
+    "cannot help with",
+    "抱歉",
+    "无法帮助",
+    "不能帮助",
+    "无法协助",
+    "不能协助",
+    "无法提供",
+    "不能提供",
+    "违反",
+    "policy",
+)
+
+
+def _normalize_compact_text(text: str, max_chars: int) -> str:
+    text = (text or "").replace("\r", "")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = text.strip()
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip() + "..."
+    return text
+
+
+def _sanitize_for_model(text: str, max_chars: int = 600) -> str:
+    text = _normalize_compact_text(text, max_chars=max_chars * 2)
+    text = re.sub(r"(?i)\b(pass(word)?|pwd|token|secret|cookie|session)\b\s*[:=]\s*\S+", r"\1=[已省略]", text)
+    text = re.sub(r"\b[A-Za-z0-9+/]{48,}={0,2}\b", "[长编码串已省略]", text)
+    lines: list[str] = []
+    omitted = 0
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if len(line) > 220:
+            line = line[:220].rstrip() + "..."
+        lines.append(line)
+        if len("\n".join(lines)) >= max_chars:
+            omitted += 1
+            break
+        if len(lines) >= 12:
+            omitted += max(0, len(text.splitlines()) - len(lines))
+            break
+    cleaned = "\n".join(lines).strip()
+    if len(cleaned) > max_chars:
+        cleaned = cleaned[:max_chars].rstrip() + "..."
+    if omitted > 0:
+        cleaned = (cleaned + f"\n[已省略部分高风险或过长原文，共 {omitted} 段]").strip()
+    return cleaned
+
+
+def _looks_like_translation_refusal(text: str) -> bool:
+    haystack = (text or "").strip().lower()
+    if not haystack:
+        return True
+    return any(pattern in haystack for pattern in _TRANSLATION_REFUSAL_PATTERNS)
+
+
+def _build_dingtalk_raw_markdown(
+    *,
+    post_url: str,
+    title: str,
+    created_at: str,
+    author_name: str,
+    first_post_text: str,
+    download_urls: list[str],
+    chongqing_related: bool,
+) -> str:
+    parts: list[str] = [f"[{title}]({post_url})"]
+    if chongqing_related:
+        parts.append("## 重庆相关重点提示\n该条内容命中了重庆相关关键词，请优先关注。")
+
+    meta_line = []
+    if author_name:
+        meta_line.append(f"作者: {author_name}")
+    if created_at:
+        meta_line.append(f"时间: {created_at}")
+    if meta_line:
+        parts.append("\n" + "    ".join(meta_line))
+
+    if download_urls:
+        parts.append("\n下载链接:")
+        for u in download_urls[:20]:
+            if isinstance(u, str) and u.strip():
+                parts.append(f"- {u.strip()}")
+
+    if first_post_text:
+        excerpt = _normalize_compact_text(first_post_text, max_chars=800)
+        if excerpt:
+            parts.append("\n> 首楼内容摘要:\n> " + excerpt.replace("\n", "\n> "))
+
+    return "\n".join(parts)
+
+
+def _build_translation_input(
+    *,
+    post_url: str,
+    title: str,
+    created_at: str,
+    author_name: str,
+    first_post_text: str,
+    download_urls: list[str],
+    chongqing_related: bool,
+) -> str:
+    parts: list[str] = []
+    parts.append(f"标题: {title}")
+    parts.append(f"帖子链接: {post_url}")
+    if chongqing_related:
+        parts.append("提示: 该内容命中重庆相关关键词，需要重点提示。")
+    if author_name:
+        parts.append(f"作者: {author_name}")
+    if created_at:
+        parts.append(f"时间: {created_at}")
+    if download_urls:
+        parts.append("下载链接:")
+        for u in download_urls[:5]:
+            if isinstance(u, str) and u.strip():
+                parts.append(f"- {u.strip()}")
+    if first_post_text:
+        parts.append("首楼摘要:")
+        parts.append(_sanitize_for_model(first_post_text, max_chars=600))
+    return "\n".join(parts).strip()
 
 
 def _scrape_thread_worker(
@@ -172,28 +341,34 @@ def _discover_forum_worker(
 
 def _translate_for_dingtalk(
     translator: OpenAICompatTranslator | None,
-    settings: Settings,
     title: str,
-    text: str,
+    model_input_text: str,
+    raw_fallback_text: str,
 ) -> tuple[str, str, str | None]:
     send_title = title[:128]
-    send_text = text
+    send_text = raw_fallback_text
     if translator is None:
         return send_title, send_text, None
     try:
-        send_title = translator.translate_title_to_zh(title)[:128]
-        send_text = translator.translate_markdown_to_zh(text)
+        translated_title = translator.translate_title_to_zh(title).strip()
+        translated_text = translator.translate_markdown_to_zh(model_input_text).strip()
+        if _looks_like_translation_refusal(translated_title):
+            raise RuntimeError(f"标题翻译疑似拒答：{translated_title}")
+        if _looks_like_translation_refusal(translated_text):
+            raise RuntimeError(f"正文翻译疑似拒答：{translated_text}")
+        send_title = translated_title[:128]
+        send_text = translated_text
         return send_title, send_text, None
     except Exception as e:
         err = repr(e)
         fallback_title = f"[翻译失败] {title}"[:128]
         fallback_text = (
             "## 翻译失败\n"
-            "模型请求失败，已回退发送原文。\n\n"
+            "模型翻译失败或触发风控，已回退发送本地整理后的原文内容。\n\n"
             f"- 模型: `{translator.model_name}`\n"
             f"- 原因: `{err}`\n\n"
             "---\n\n"
-            f"{text}"
+            f"{raw_fallback_text}"
         )
         return fallback_title, fallback_text, err
 
@@ -384,35 +559,34 @@ def _deliver_to_dingtalk(conn, settings: Settings) -> None:
             print(f"[dingtalk] filtered_non_china: {post_url}")
             continue
 
-        parts: list[str] = [f"[{title}]({post_url})"]
-        if _is_chongqing_related(post_url, title, first_post_text):
-            parts.append("## 重庆相关重点提示\n该条内容命中了重庆相关关键词，请优先关注。")
-
-        meta_line = []
-        if author_name:
-            meta_line.append(f"作者: {author_name}")
-        if created_at:
-            meta_line.append(f"时间: {created_at}")
-        if meta_line:
-            parts.append("\n" + "    ".join(meta_line))
-
-        if download_urls:
-            parts.append("\n下载链接:")
-            for u in download_urls[:20]:
-                if isinstance(u, str) and u.strip():
-                    parts.append(f"- {u.strip()}")
-
-        if first_post_text:
-            excerpt = first_post_text.strip()
-            if len(excerpt) > 800:
-                excerpt = excerpt[:800] + "..."
-            parts.append("\n> 首楼内容摘要:\n> " + excerpt.replace("\n", "\n> "))
-
-        raw_text = "\n".join(parts)
-        send_title, send_text, translate_error = _translate_for_dingtalk(translator, settings, title, raw_text)
+        chongqing_related = _is_chongqing_related(post_url, title, first_post_text)
+        raw_text = _build_dingtalk_raw_markdown(
+            post_url=post_url,
+            title=title,
+            created_at=created_at,
+            author_name=author_name,
+            first_post_text=first_post_text,
+            download_urls=download_urls,
+            chongqing_related=chongqing_related,
+        )
+        model_input_text = _build_translation_input(
+            post_url=post_url,
+            title=title,
+            created_at=created_at,
+            author_name=author_name,
+            first_post_text=first_post_text,
+            download_urls=download_urls,
+            chongqing_related=chongqing_related,
+        )
+        send_title, send_text, translate_error = _translate_for_dingtalk(
+            translator,
+            title,
+            model_input_text,
+            raw_text,
+        )
         if translate_error:
             print(f"[dingtalk] translate_failed fallback_original: {post_url} -> {translate_error}")
-        elif _is_chongqing_related(post_url, title, first_post_text):
+        elif chongqing_related:
             send_title = f"[重庆相关] {send_title}"[:128]
 
         try:
@@ -484,20 +658,20 @@ def run_daily(settings: Settings, project_root: Path) -> None:
     )
     try:
         page = new_page(session)
-        print("[1/4] Logging in...")
+        print("[1/4] 开始登录论坛...")
         login(page, settings.base_url, settings.username, settings.password)
         save_storage_state(page, storage_state_path)
-        print("[1/4] Logged in.")
+        print("[1/4] 登录成功，已保存登录态。")
 
         if settings.forum_urls:
-            print(f"[2/4] Discovering threads from {len(settings.forum_urls)} forum(s)...")
+            print(f"[2/4] 开始发现帖子，共 {len(settings.forum_urls)} 个版块...")
             if settings.latest_page_only:
-                print(f"[2/4] latest_page_only enabled: each forum will fetch only the newest 1 page using sort_query={settings.forum_sort_query!r}")
+                print(f"[2/4] 已开启仅抓最新页：每个版块只访问最新 1 页，排序参数={settings.forum_sort_query!r}")
             discovered = 0
             inserted = 0
             sample_urls: list[str] = []
             discover_workers = min(max(1, int(settings.scrape_workers)), len(settings.forum_urls))
-            print(f"[2/4] discover_workers={discover_workers}")
+            print(f"[2/4] 发现阶段并发数={discover_workers}")
             cursor_map = {forum_url: get_cursor(conn, f"forum:{forum_url}") for forum_url in settings.forum_urls}
             with ThreadPoolExecutor(max_workers=discover_workers) as executor:
                 future_map = {
@@ -508,7 +682,7 @@ def run_daily(settings: Settings, project_root: Path) -> None:
                     forum_url = future_map[future]
                     outcome = future.result()
                     if outcome.error is not None:
-                        print(f"[2/4] discover failed: forum={forum_url} error={outcome.error}")
+                        print(f"[2/4] 发现失败：forum={forum_url}，错误={outcome.error}")
                         continue
                     max_started_at: str | None = None
                     for th in outcome.threads:
@@ -521,15 +695,15 @@ def run_daily(settings: Settings, project_root: Path) -> None:
                             max_started_at = th.started_at
                     if max_started_at:
                         set_cursor(conn, f"forum:{forum_url}", max_started_at)
-            print("[2/4] Discovery done.")
-            print(f"[2/4] Discovered (pre-dedup yield count): {discovered}")
-            print(f"[2/4] Inserted into SQLite: {inserted}")
+            print("[2/4] 帖子发现完成。")
+            print(f"[2/4] 发现帖子数（去重前）: {discovered}")
+            print(f"[2/4] 写入 SQLite 新线程数: {inserted}")
             if sample_urls:
-                print("[2/4] Sample discovered URLs:")
+                print("[2/4] 样例帖子链接：")
                 for u in sample_urls:
                     print(f"  - {u}")
 
-        print("[3/4] Scraping pending threads...")
+        print("[3/4] 开始抓取待处理帖子内容...")
         processed = 0
         charged = 0
         skipped_browser_check = 0
@@ -593,7 +767,7 @@ def run_daily(settings: Settings, project_root: Path) -> None:
                         dt0 = datetime.fromisoformat(created_iso.replace("Z", "+00:00"))
                         if dt0 < cutoff_dt:
                             mark_failed(conn, url, "older_than_cutoff")
-                            print(f"[skip] {url} -> older_than_cutoff created_at={created_iso}")
+                            print(f"[跳过] {url} -> 超过时间窗口，created_at={created_iso}")
                             processed += 1
                             failed_threads += 1
                             charged += 1
@@ -624,7 +798,7 @@ def run_daily(settings: Settings, project_root: Path) -> None:
                 )
             except Exception as e:
                 mark_failed(conn, url, repr(e))
-                print(f"[failed] {url} -> {repr(e)}")
+                print(f"[失败] 预处理帖子失败：{url} -> {repr(e)}")
                 processed += 1
                 failed_threads += 1
                 charged += 1
@@ -633,7 +807,7 @@ def run_daily(settings: Settings, project_root: Path) -> None:
 
         if pending_tasks:
             worker_count = min(max(1, int(settings.scrape_workers)), len(pending_tasks))
-            print(f"[3/4] queued={len(pending_tasks)} scrape_workers={worker_count}")
+            print(f"[3/4] 待抓取数量={len(pending_tasks)}，抓取并发数={worker_count}")
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
                 future_map = {executor.submit(_scrape_thread_worker, settings, storage_state_path, task): task.url for task in pending_tasks}
                 for future in as_completed(future_map):
@@ -642,7 +816,7 @@ def run_daily(settings: Settings, project_root: Path) -> None:
                         outcome = future.result()
                     except Exception as e:
                         mark_failed(conn, url, repr(e))
-                        print(f"[failed] {url} -> {repr(e)}")
+                        print(f"[失败] 抓取任务执行异常：{url} -> {repr(e)}")
                         processed += 1
                         failed_threads += 1
                         charged += 1
@@ -650,19 +824,19 @@ def run_daily(settings: Settings, project_root: Path) -> None:
 
                     if outcome.browser_check:
                         mark_failed(conn, url, "browser_check")
-                        print(f"[skip] {url} -> browser_check")
+                        print(f"[跳过] {url} -> 命中浏览器验证页")
                         processed += 1
                         failed_threads += 1
                         skipped_browser_check += 1
                         if skipped_browser_check >= max_browser_check_skips:
-                            print(f"[skip] hit browser_check skip cap: {skipped_browser_check}")
+                            print(f"[跳过] 已达到浏览器验证页跳过上限：{skipped_browser_check}")
                             break
                         continue
 
                     if outcome.error is not None or outcome.result is None:
                         err = outcome.error or "unknown_worker_error"
                         mark_failed(conn, url, err)
-                        print(f"[failed] {url} -> {err}")
+                        print(f"[失败] 抓取帖子失败：{url} -> {err}")
                         processed += 1
                         failed_threads += 1
                         charged += 1
@@ -674,20 +848,20 @@ def run_daily(settings: Settings, project_root: Path) -> None:
                     author_name = (result.author_name or "").strip()
                     first_post_text = (result.first_post_text or "").strip()
                     download_urls = tuple(u.strip() for u in (result.download_urls or ()) if u and u.strip())
-                    print(f"[meta] created_at={created_at or '(missing)'} url={url}")
+                    print(f"[帖子信息] created_at={created_at or '(缺失)'} url={url}")
 
                     if not (settings.full_site_mode or settings.latest_page_only):
                         parsed_dt = _parse_localized_dt(created_at)
                         if parsed_dt is None:
                             mark_failed(conn, url, "created_at_unparseable")
-                            print(f"[failed] {url} -> created_at_unparseable")
+                            print(f"[失败] {url} -> 发帖时间无法解析")
                             processed += 1
                             failed_threads += 1
                             charged += 1
                             continue
                         if parsed_dt < cutoff_dt:
                             mark_failed(conn, url, "older_than_cutoff")
-                            print(f"[skip] {url} -> older_than_cutoff created_at={created_at}")
+                            print(f"[跳过] {url} -> 超过时间窗口，created_at={created_at}")
                             processed += 1
                             failed_threads += 1
                             charged += 1
@@ -718,7 +892,7 @@ def run_daily(settings: Settings, project_root: Path) -> None:
                     )
                     insert_post(conn, rec)
                     mark_extracted(conn, url, result.fetched_at, downloads_count=len(download_urls))
-                    print(f"[ok] {url} -> inserted post (downloads {len(download_urls)})")
+                    print(f"[成功] {url} -> 已写入帖子内容（下载链接 {len(download_urls)} 条）")
                     ok_threads += 1
                     total_download_urls += len(download_urls)
                     inserted_download_rows += 1
@@ -728,19 +902,19 @@ def run_daily(settings: Settings, project_root: Path) -> None:
                         break
 
         if settings.dingtalk_enabled:
-            print("[4/4] Delivering to DingTalk...")
+            print("[4/4] 开始推送钉钉消息...")
             try:
                 _deliver_to_dingtalk(conn, settings)
             except Exception as e:
-                print(f"[dingtalk] deliver step failed -> {repr(e)}")
+                print(f"[钉钉] 推送阶段失败 -> {repr(e)}")
         elif settings.feishu_enabled:
-            print("[4/4] Delivering to Feishu...")
+            print("[4/4] 开始推送飞书消息...")
             try:
                 _deliver_to_feishu(conn, settings)
             except Exception as e:
-                print(f"[feishu] deliver step failed -> {repr(e)}")
+                print(f"[飞书] 推送阶段失败 -> {repr(e)}")
 
-        print("[4/4] Done.")
+        print("[4/4] 本轮执行完成。")
 
         try:
             pending = conn.execute(
@@ -749,24 +923,24 @@ def run_daily(settings: Settings, project_root: Path) -> None:
             threads_total = conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
             posts_total = conn.execute("SELECT COUNT(*) FROM posts").fetchone()[0]
             print(
-                "[run] processed=%d charged=%d skipped_browser_check=%d ok=%d failed=%d download_urls=%d downloads_new=%d"
+                "[运行统计] processed=%d charged=%d skipped_browser_check=%d ok=%d failed=%d download_urls=%d downloads_new=%d"
                 % (processed, charged, skipped_browser_check, ok_threads, failed_threads, total_download_urls, inserted_download_rows)
             )
-            print("[db] threads_total=%d posts_total=%d pending=%d" % (threads_total, posts_total, pending))
+            print("[数据库] threads_total=%d posts_total=%d pending=%d" % (threads_total, posts_total, pending))
         except Exception:
             pass
 
         try:
             cur = conn.execute("SELECT status, COUNT(*) FROM threads GROUP BY status")
             stats = {row[0]: int(row[1]) for row in cur.fetchall()}
-            print(f"[stats] {stats}")
+            print(f"[状态统计] {stats}")
         except Exception:
             pass
 
         try:
             pruned = prune_threads(conn, retention_days=30)
             if pruned:
-                print(f"[db] pruned_old_threads={pruned}")
+                print(f"[数据库] 已清理过期线程数={pruned}")
         except Exception:
             pass
     finally:

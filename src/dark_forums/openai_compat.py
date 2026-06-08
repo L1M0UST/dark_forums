@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import re
 
 import requests
 from requests.exceptions import SSLError
@@ -22,6 +23,11 @@ class OpenAICompatTranslator:
     @property
     def model_name(self) -> str:
         return self._cfg.model
+
+    @staticmethod
+    def _strip_think_blocks(text: str) -> str:
+        cleaned = re.sub(r"<think>.*?</think>", "", text or "", flags=re.IGNORECASE | re.DOTALL)
+        return cleaned.strip()
 
     def _post_chat(self, system_prompt: str, user_prompt: str) -> str:
         url = f"{self._cfg.base_url}/chat/completions"
@@ -61,28 +67,39 @@ class OpenAICompatTranslator:
 
         last_exc: Exception | None = None
         resp = None
-        for extra in attempts:
+        for idx, extra in enumerate(attempts, start=1):
             try:
+                if extra.get("proxies"):
+                    print(f"[翻译] 正在请求模型，第 {idx}/{len(attempts)} 次，使用代理：{self._cfg.proxy_server}")
+                else:
+                    print(f"[翻译] 正在请求模型，第 {idx}/{len(attempts)} 次，直连访问。")
                 resp = requests.post(url, **request_kwargs, **extra)
                 break
             except SSLError as exc:
                 last_exc = exc
+                print(f"[翻译] 模型请求 SSL 失败，第 {idx}/{len(attempts)} 次：{repr(exc)}")
             except Exception as exc:
                 last_exc = exc
+                print(f"[翻译] 模型请求失败，第 {idx}/{len(attempts)} 次：{repr(exc)}")
         if resp is None:
-            raise RuntimeError(f"openai_compat_request_failed: {repr(last_exc)}")
+            raise RuntimeError(f"模型请求失败，可能是网络不通或代理异常：{repr(last_exc)}")
 
         if resp.status_code >= 400:
             body = resp.text[:500]
-            raise RuntimeError(f"openai_compat_http_{resp.status_code}: {body}")
+            raise RuntimeError(f"模型请求失败，HTTP {resp.status_code}，返回内容：{body}")
 
         data = resp.json()
+        if bool(data.get("input_sensitive")) or bool(data.get("output_sensitive")):
+            raise RuntimeError(f"模型触发风控拦截：{data}")
         try:
             content = data["choices"][0]["message"]["content"]
         except Exception as exc:
-            raise RuntimeError(f"openai_compat_bad_response: {data}") from exc
-        if not isinstance(content, str) or not content.strip():
-            raise RuntimeError(f"openai_compat_empty_response: {data}")
+            raise RuntimeError(f"模型返回格式异常：{data}") from exc
+        if not isinstance(content, str):
+            raise RuntimeError(f"模型返回内容格式异常：{data}")
+        content = self._strip_think_blocks(content)
+        if not content.strip():
+            raise RuntimeError(f"模型返回内容为空：{data}")
         return content.strip()
 
     def translate_title_to_zh(self, title: str) -> str:

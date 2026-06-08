@@ -51,6 +51,28 @@ def _parse_title_datetime(title: str) -> datetime | None:
     return None
 
 
+def _extract_datetime_from_text(text: str) -> datetime | None:
+    t = (text or "").strip()
+    if not t:
+        return None
+
+    import re
+
+    m = re.search(r"\b(\d{2}-\d{2}-\d{2},\s*\d{1,2}:\d{2}\s*[AP]M)\b", t, flags=re.IGNORECASE)
+    if m:
+        dt = _parse_title_datetime(m.group(1))
+        if dt is not None:
+            return dt
+
+    m = re.search(r"\b(\d{2}-\d{2}-\d{2},\s*\d{1,2}:\d{2})\b", t)
+    if m:
+        dt = _parse_title_datetime(m.group(1))
+        if dt is not None:
+            return dt
+
+    return _parse_title_datetime(t)
+
+
 def _normalize_thread_url(abs_url: str) -> str:
     parsed = urlparse(abs_url)
     q = parsed.query
@@ -161,6 +183,10 @@ def discover_today_threads(
             break
         except Exception as e:
             last_exc = e
+            print(
+                f"[发现] 打开版块失败，第 {attempt + 1}/3 次：forum={forum_url}，"
+                f"可能是网络不通或代理异常，错误={repr(e)}"
+            )
             page.wait_for_timeout(1000 * (attempt + 1))
 
     if last_exc is not None:
@@ -176,6 +202,7 @@ def discover_today_threads(
 
     html = page.content()
     if _is_browser_check(html):
+        print(f"[发现] 版块页面命中浏览器验证，forum={forum_url}，正在尝试自动绕过。")
         for _ in range(3):
             if _try_bypass_browser_check(page):
                 html = page.content()
@@ -191,6 +218,7 @@ def discover_today_threads(
                 (out_dir / f"browser_check_discover_{safe}.html").write_text(html, encoding="utf-8")
             except Exception:
                 pass
+            print(f"[发现] 版块页面浏览器验证绕过失败，已跳过：forum={forum_url}")
             return
 
     today = _today_utc()
@@ -235,24 +263,33 @@ def discover_today_threads(
         except Exception:
             scope = None
 
+        subject_selector = (
+            "tr.inline_row span.subject_new a[href^='Thread-'], "
+            "tr.inline_row span.subject_old a[href^='Thread-'], "
+            "tr.inline_row span.subject_new a[href^='thread-'], "
+            "tr.inline_row span.subject_old a[href^='thread-']"
+        )
+        broad_selector = (
+            "tr.inline_row a[href^='Thread-'], "
+            "tr.inline_row a[href^='thread-']"
+        )
+
         if scope is not None:
-            anchors = scope.locator(
-                "tr.inline_row span.subject_new a[href^='Thread-'], "
-                "tr.inline_row span.subject_old a[href^='Thread-'], "
-                "tr.inline_row span.subject_new a[href^='thread-'], "
-                "tr.inline_row span.subject_old a[href^='thread-'], "
-                "tr.inline_row a[href^='Thread-'], "
-                "tr.inline_row a[href^='thread-']"
-            )
+            anchors = scope.locator(subject_selector)
+            if anchors.count() <= 0:
+                anchors = scope.locator(broad_selector)
         else:
             anchors = page.locator(
                 "section#forum-display tr.inline_row span.subject_new a[href^='Thread-'], "
                 "section#forum-display tr.inline_row span.subject_old a[href^='Thread-'], "
                 "section#forum-display tr.inline_row span.subject_new a[href^='thread-'], "
-                "section#forum-display tr.inline_row span.subject_old a[href^='thread-'], "
-                "section#forum-display tr.inline_row a[href^='Thread-'], "
-                "section#forum-display tr.inline_row a[href^='thread-']"
+                "section#forum-display tr.inline_row span.subject_old a[href^='thread-']"
             )
+            if anchors.count() <= 0:
+                anchors = page.locator(
+                    "section#forum-display tr.inline_row a[href^='Thread-'], "
+                    "section#forum-display tr.inline_row a[href^='thread-']"
+                )
         count = anchors.count()
         page_had_today = False
         page_had_older = False
@@ -280,7 +317,11 @@ def discover_today_threads(
                 continue
             seen_urls.add(abs_url)
 
-            row = a.locator("xpath=ancestor::*[self::tr or self::li or self::div][1]")
+            row = a.locator("xpath=ancestor::tr[1]")
+            if row.count() <= 0:
+                row = a.locator("xpath=ancestor::li[1]")
+            if row.count() <= 0:
+                row = a.locator("xpath=ancestor::div[1]")
             # Some rows can be 'delete thread' notices or not visible; skip them early.
             try:
                 row_txt = (row.inner_text(timeout=500) or "").lower()
@@ -295,6 +336,18 @@ def discover_today_threads(
             time_loc = row.locator("time")
             if time_loc.count() > 0:
                 started_dt = _extract_time_dt(time_loc.first)
+
+            if started_dt is None:
+                # Many forum skins render the thread date directly inside this span.
+                date_loc = row.locator("span.forum-display__thread-date")
+                if date_loc.count() > 0:
+                    try:
+                        date_txt = date_loc.first.inner_text(timeout=1000) or ""
+                    except Exception:
+                        date_txt = ""
+                    dt0 = _extract_datetime_from_text(date_txt)
+                    if dt0 is not None:
+                        started_dt = dt0
 
             if started_dt is None:
                 # Prefer the forum thread date span with title attribute.
@@ -327,6 +380,12 @@ def discover_today_threads(
                             started_dt = dt2
 
             if started_dt is None:
+                # Generic fallback: regex match a localized datetime from the row text.
+                dt3 = _extract_datetime_from_text(row_txt)
+                if dt3 is not None:
+                    started_dt = dt3
+
+            if started_dt is None:
                 # Forum variants: date often appears in the 2nd TD's inner spans (no title attr),
                 # e.g. /html/body/div[1]/main/div/section[2]/table/tbody/tr[6]/td[2]/div/div/span[2]
                 try:
@@ -339,9 +398,9 @@ def discover_today_threads(
                     except Exception:
                         ttxt = ""
                     if ttxt.strip():
-                        dt3 = _parse_title_datetime(ttxt.strip())
-                        if dt3 is not None:
-                            started_dt = dt3
+                        dt4 = _extract_datetime_from_text(ttxt.strip())
+                        if dt4 is not None:
+                            started_dt = dt4
 
             if cursor_dt is not None and started_dt is not None and started_dt <= cursor_dt:
                 if len(skip_reasons) < 20:
@@ -422,6 +481,10 @@ def discover_today_threads(
                 )
             except Exception:
                 pass
+            print(
+                f"[发现] 已输出调试文件：page_url={page.url}，anchor_count={count}，"
+                f"yielded_count={yielded_count}，tag={tag}"
+            )
 
         if only_today and page_had_older and saw_any_today and not page_had_today:
             break
