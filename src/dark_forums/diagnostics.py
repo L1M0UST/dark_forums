@@ -117,6 +117,22 @@ def _sanitize_for_model(text: str, max_chars: int = 600) -> str:
     return cleaned
 
 
+def _build_local_safe_summary(title: str, first_post_text: str, max_chars: int = 220) -> str:
+    base = _sanitize_for_model(first_post_text or title, max_chars=max_chars)
+    base = re.sub(r"(?i)https?://\S+", "[链接已省略]", base)
+    base = re.sub(r"(?i)\b(download|下载链接|credential|password|cookie|token|session|exploit|payload)\b", "[敏感细节已省略]", base)
+    base = base.replace("- ", "")
+    base = base.strip(" >\n")
+    if not base:
+        base = "检测到一条与中国相关的疑似泄露或风险信息，具体敏感细节已省略。"
+    return base[:max_chars].rstrip() + ("..." if len(base) > max_chars else "")
+
+
+def _build_notification_title(*, title: str, first_post_text: str, chongqing_related: bool) -> str:
+    prefix = "重庆相关风险摘要" if chongqing_related else "中国相关风险摘要"
+    return prefix[:128]
+
+
 def _looks_like_translation_refusal(text: str) -> bool:
     haystack = (text or "").strip().lower()
     if not haystack:
@@ -205,16 +221,12 @@ def _build_dingtalk_raw_markdown(
     if meta_line:
         parts.append("\n" + "    ".join(meta_line))
 
-    if download_urls:
-        parts.append("\n下载链接:")
-        for u in download_urls[:20]:
-            if isinstance(u, str) and u.strip():
-                parts.append(f"- {u.strip()}")
+    summary = _build_local_safe_summary(title, first_post_text, max_chars=220)
+    if summary:
+        parts.append("\n> 合规摘要:\n> " + summary.replace("\n", "\n> "))
 
-    if first_post_text:
-        excerpt = _normalize_compact_text(first_post_text, max_chars=800)
-        if excerpt:
-            parts.append("\n> 首楼内容摘要:\n> " + excerpt.replace("\n", "\n> "))
+    if download_urls:
+        parts.append("\n> 说明: 具体下载链接与敏感细节已省略，请进入原帖人工核验。")
 
     return "\n".join(parts)
 
@@ -238,36 +250,28 @@ def _build_translation_input(
         parts.append(f"作者: {author_name}")
     if created_at:
         parts.append(f"时间: {created_at}")
-    if download_urls:
-        parts.append("下载链接:")
-        for u in download_urls[:5]:
-            if isinstance(u, str) and u.strip():
-                parts.append(f"- {u.strip()}")
-    if first_post_text:
-        parts.append("首楼摘要:")
-        parts.append(_sanitize_for_model(first_post_text, max_chars=600))
+    parts.append("要求: 输出合规、简洁的中文风险摘要；不要输出下载链接、凭证、口令、Cookie、Token、样本、利用步骤或其他敏感细节。")
+    parts.append("首楼合规摘要:")
+    parts.append(_build_local_safe_summary(title, first_post_text, max_chars=260))
     return "\n".join(parts).strip()
 
 
 def _translate_for_test(
     translator: OpenAICompatTranslator,
-    title: str,
+    notification_title: str,
     model_input_text: str,
     raw_fallback_text: str,
     *,
     chongqing_related: bool,
 ) -> tuple[str, str, str | None]:
     try:
-        translated_title = translator.translate_title_to_zh(title).strip()
         translated_text = translator.translate_markdown_to_zh(model_input_text).strip()
-        if _looks_like_translation_refusal(translated_title):
-            raise RuntimeError(f"标题翻译疑似拒答：{translated_title}")
         if _looks_like_translation_refusal(translated_text):
             raise RuntimeError(f"正文翻译疑似拒答：{translated_text}")
-        send_title = translated_title[:128]
+        send_title = notification_title[:128]
         send_text = _clean_translated_notification_text(
             translated_text,
-            original_title=title,
+            original_title=notification_title,
             translated_title=send_title,
             chongqing_related=chongqing_related,
         )
@@ -276,7 +280,7 @@ def _translate_for_test(
         return send_title, send_text, None
     except Exception as e:
         err = repr(e)
-        fallback_title = f"[翻译失败] {title}"[:128]
+        fallback_title = f"[翻译失败] {notification_title}"[:128]
         fallback_text = (
             "## 翻译失败\n"
             "模型翻译失败或触发风控，已回退发送本地整理后的原文内容。\n\n"
@@ -380,6 +384,11 @@ def _run_test_notify_inner(settings: Settings) -> None:
         download_urls=download_urls,
         chongqing_related=chongqing_related,
     )
+    notification_title = _build_notification_title(
+        title=title,
+        first_post_text=first_post_text,
+        chongqing_related=chongqing_related,
+    )
     model_input_text = _build_translation_input(
         post_url=post_url,
         title=title,
@@ -394,10 +403,10 @@ def _run_test_notify_inner(settings: Settings) -> None:
         f"[测试] 翻译模型配置：base_url={settings.llm_base_url} model={settings.llm_model} "
         f"use_proxy={settings.llm_use_proxy} proxy={settings.llm_proxy_server or '(empty)'}"
     )
-    print("[测试] 步骤 1/2：开始测试标题翻译与正文翻译。")
+    print(f"[测试] 步骤 1/2：开始测试合规摘要翻译，通知标题将使用本地安全标题：{notification_title}")
     send_title, send_text, translate_error = _translate_for_test(
         translator,
-        title,
+        notification_title,
         model_input_text,
         raw_text,
         chongqing_related=chongqing_related,
