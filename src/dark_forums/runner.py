@@ -54,6 +54,43 @@ _CHINA_KEYWORDS = (
 )
 
 _CHONGQING_KEYWORDS = ("重庆", "重慶", "chongqing")
+_REGION_GROUPS = (
+    ("重庆", ("重庆", "重慶", "chongqing")),
+    ("北京", ("北京", "beijing")),
+    ("上海", ("上海", "shanghai")),
+    ("天津", ("天津", "tianjin")),
+    ("香港", ("香港", "hong kong", "hongkong")),
+    ("澳门", ("澳门", "澳門", "macao", "macau")),
+    ("台湾", ("台湾", "台灣", "taiwan")),
+    ("河北", ("河北",)),
+    ("山西", ("山西",)),
+    ("辽宁", ("辽宁", "遼寧", "liaoning")),
+    ("吉林", ("吉林", "jilin")),
+    ("黑龙江", ("黑龙江", "黑龍江", "heilongjiang")),
+    ("江苏", ("江苏", "江蘇", "jiangsu")),
+    ("浙江", ("浙江", "zhejiang")),
+    ("安徽", ("安徽", "anhui")),
+    ("福建", ("福建", "fujian")),
+    ("江西", ("江西", "jiangxi")),
+    ("山东", ("山东", "山東", "shandong")),
+    ("河南", ("河南", "henan")),
+    ("湖北", ("湖北", "hubei")),
+    ("湖南", ("湖南", "hunan")),
+    ("广东", ("广东", "廣東", "guangdong")),
+    ("广西", ("广西", "廣西", "guangxi")),
+    ("海南", ("海南", "hainan")),
+    ("四川", ("四川", "sichuan")),
+    ("贵州", ("贵州", "貴州", "guizhou")),
+    ("云南", ("云南", "雲南", "yunnan")),
+    ("陕西", ("陕西", "陝西", "shanxi")),
+    ("甘肃", ("甘肃", "甘肅", "gansu")),
+    ("青海", ("青海", "qinghai")),
+    ("内蒙古", ("内蒙古", "內蒙古", "inner mongolia")),
+    ("西藏", ("西藏", "tibet")),
+    ("宁夏", ("宁夏", "寧夏", "ningxia")),
+    ("新疆", ("新疆", "xinjiang")),
+    ("中国", ("中国", "中國", "china", "prc")),
+)
 
 
 @dataclass(frozen=True)
@@ -217,8 +254,54 @@ def _build_local_safe_summary(title: str, first_post_text: str, max_chars: int =
     return base[:max_chars].rstrip() + ("..." if len(base) > max_chars else "")
 
 
+def _extract_region_labels(*parts: str, limit: int = 3) -> list[str]:
+    haystack = "\n".join([(p or "") for p in parts]).lower()
+    found: list[str] = []
+    for label, keywords in _REGION_GROUPS:
+        if any(keyword.lower() in haystack for keyword in keywords):
+            found.append(label)
+        if len(found) >= limit:
+            break
+    if len(found) > 1 and "中国" in found:
+        found = [label for label in found if label != "中国"]
+    return found or ["中国"]
+
+
+def _infer_target_scope(*parts: str) -> str:
+    haystack = "\n".join([(p or "") for p in parts]).lower()
+    scope_rules = (
+        ("政府或公共机构", ("政府", "公安", "法院", "税务", "gov", "government", "ministry", "bureau")),
+        ("教育机构", ("大学", "学院", "学校", "教育", "university", "college", "school", "campus")),
+        ("医疗机构", ("医院", "医疗", "clinic", "hospital", "medical", "healthcare")),
+        ("金融机构", ("银行", "证券", "保险", "支付", "bank", "finance", "financial", "payment")),
+        ("通信服务", ("运营商", "通信", "telecom", "isp", "mobile", "broadband")),
+        ("互联网平台", ("平台", "电商", "网站", "app", "platform", "ecommerce", "saas")),
+        ("企业机构", ("企业", "公司", "集团", "厂商", "company", "corp", "corporation", "enterprise")),
+    )
+    for label, keywords in scope_rules:
+        if any(keyword.lower() in haystack for keyword in keywords):
+            return label
+    return "未知机构"
+
+
+def _build_monitoring_overview(*, title: str, first_post_text: str, chongqing_related: bool) -> str:
+    regions = "、".join(_extract_region_labels(title, first_post_text))
+    target_scope = _infer_target_scope(title, first_post_text)
+    lines = []
+    if chongqing_related:
+        lines.append("## 重庆相关重点提示")
+        lines.append("该条内容命中了重庆相关关键词，请优先关注。")
+        lines.append("")
+    lines.append("## 监控概览")
+    lines.append(f"- 关联地区: {regions}")
+    lines.append(f"- 关联对象: {target_scope}")
+    lines.append("- 风险类型: 疑似信息外泄或数据风险")
+    lines.append("- 说明: 仅保留监控所需概览信息，个人隐私、样本、字段、下载方式及其他敏感细节均已省略，请进入原帖人工核验。")
+    return "\n".join(lines)
+
+
 def _build_notification_title(*, title: str, first_post_text: str, chongqing_related: bool) -> str:
-    prefix = "重庆相关风险摘要" if chongqing_related else "中国相关风险摘要"
+    prefix = "重庆相关监控通报" if chongqing_related else "中国相关监控通报"
     return prefix[:128]
 
 
@@ -298,25 +381,17 @@ def _build_dingtalk_raw_markdown(
     download_urls: list[str],
     chongqing_related: bool,
 ) -> str:
-    parts: list[str] = [f"[{title}]({post_url})"]
-    if chongqing_related:
-        parts.append("## 重庆相关重点提示\n该条内容命中了重庆相关关键词，请优先关注。")
-
-    meta_line = []
-    if author_name:
-        meta_line.append(f"作者: {author_name}")
+    parts: list[str] = ["[监控原帖链接](" + post_url + ")"]
     if created_at:
-        meta_line.append(f"时间: {created_at}")
-    if meta_line:
-        parts.append("\n" + "    ".join(meta_line))
-
-    summary = _build_local_safe_summary(title, first_post_text, max_chars=220)
-    if summary:
-        parts.append("\n> 合规摘要:\n> " + summary.replace("\n", "\n> "))
-
-    if download_urls:
-        parts.append("\n> 说明: 具体下载链接与敏感细节已省略，请进入原帖人工核验。")
-
+        parts.append(f"\n时间: {created_at}")
+    parts.append("")
+    parts.append(
+        _build_monitoring_overview(
+            title=title,
+            first_post_text=first_post_text,
+            chongqing_related=chongqing_related,
+        )
+    )
     return "\n".join(parts)
 
 
@@ -330,18 +405,17 @@ def _build_translation_input(
     download_urls: list[str],
     chongqing_related: bool,
 ) -> str:
+    regions = "、".join(_extract_region_labels(title, first_post_text))
+    target_scope = _infer_target_scope(title, first_post_text)
     parts: list[str] = []
-    parts.append(f"标题: {title}")
     parts.append(f"帖子链接: {post_url}")
-    if chongqing_related:
-        parts.append("提示: 该内容命中重庆相关关键词，需要重点提示。")
-    if author_name:
-        parts.append(f"作者: {author_name}")
     if created_at:
         parts.append(f"时间: {created_at}")
-    parts.append("要求: 输出合规、简洁的中文风险摘要；不要输出下载链接、凭证、口令、Cookie、Token、样本、利用步骤或其他敏感细节。")
-    parts.append("首楼合规摘要:")
-    parts.append(_build_local_safe_summary(title, first_post_text, max_chars=260))
+    parts.append(f"关联地区: {regions}")
+    parts.append(f"关联对象: {target_scope}")
+    parts.append("风险类型: 疑似信息外泄或数据风险")
+    parts.append(f"重庆重点提示: {'是' if chongqing_related else '否'}")
+    parts.append("要求: 生成一段简洁、合规、易懂的中文监控概览，只说明哪里出现了疑似泄露风险以及需要关注的对象类型；不要输出任何个人隐私、姓名、账号、邮箱、手机号、身份证号、下载链接、数据字段、样本内容、凭证、口令、Cookie、Token、利用步骤或其他敏感细节。")
     return "\n".join(parts).strip()
 
 
