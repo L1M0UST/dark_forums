@@ -102,6 +102,9 @@ class OpenAICompatTranslator:
             raise RuntimeError(f"模型返回内容为空：{data}")
         return content.strip()
 
+    def complete(self, system_prompt: str, user_prompt: str) -> str:
+        return self._post_chat(system_prompt, user_prompt)
+
     def translate_title_to_zh(self, title: str) -> str:
         return self._post_chat(
             "Translate the input title into concise Simplified Chinese. Keep technical terms, organization names, counts, IDs, and URLs accurate. Output only the translated title. Do not explain. Do not add notes. Do not add any preamble or analysis.",

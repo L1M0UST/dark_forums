@@ -206,6 +206,60 @@ _TRANSLATION_REFUSAL_PATTERNS = (
 )
 
 
+_TRANSLATION_WARNING_PATTERNS = (
+    "as an ai",
+    "i'm unable",
+    "i am unable",
+    "i cannot provide",
+    "i can't provide",
+    "cannot comply",
+    "can't comply",
+    "safety policy",
+    "usage policy",
+    "content policy",
+    "guideline",
+    "guidelines",
+    "æˆ‘æ— æ³•",
+    "æˆ‘ä¸èƒ½",
+    "æ— æ³•æ»¡è¶³",
+    "ä¸èƒ½æ»¡è¶³",
+    "æ— æ³•ç¿»è¯‘",
+    "ä¸èƒ½ç¿»è¯‘",
+    "å®‰å…¨æ”¿ç­–",
+    "ä½¿ç”¨æ”¿ç­–",
+    "å†…å®¹æ”¿ç­–",
+    "ç¤¾åŒºå‡†åˆ™",
+)
+_MODEL_PROMPT_ECHO_MARKERS = (
+    "è¦æ±‚:",
+    "ä¸è¦è¾“å‡º",
+    "ç”Ÿæˆä¸€æ®µ",
+    "åªè¯´æ˜Žå“ªé‡Œå‡ºçŽ°äº†",
+    "use only provided",
+    "do not output",
+    "write a short",
+)
+_MONITORING_TRANSLATION_FULL_PROMPT = (
+    "Rewrite the structured monitoring note into concise Simplified Chinese markdown for internal security monitoring. "
+    "Keep only monitoring-level information: region, target type, high-level risk, source link, and whether Chongqing needs priority attention. "
+    "Never include policy warnings, refusal wording, explanations, personal data, samples, credentials, download details, or attack steps. "
+    "If the information is limited, still output a short final Chinese monitoring notice using only the provided fields. "
+    "Output only the final Chinese markdown."
+)
+_MONITORING_TRANSLATION_COMPACT_PROMPT = (
+    "Using only the safe structured fields, write a very short Simplified Chinese monitoring overview in markdown. "
+    "Keep region, target type, risk type, and Chongqing priority if present. "
+    "Do not mention policy, safety, refusal, personal data, links, samples, or any sensitive details. "
+    "Output only the final Chinese markdown."
+)
+_MONITORING_TRANSLATION_MINIMAL_PROMPT = (
+    "Write a minimal Simplified Chinese monitoring notice from the safe fields only. "
+    "Mention only region, target type, and that there is a suspected data-risk event. "
+    "If Chongqing is marked as priority, explicitly say it needs priority attention. "
+    "Do not add any warning, refusal, explanation, or sensitive detail. Output only the final Chinese markdown."
+)
+
+
 def _normalize_compact_text(text: str, max_chars: int) -> str:
     text = (text or "").replace("\r", "")
     text = re.sub(r"[ \t]+", " ", text)
@@ -310,6 +364,89 @@ def _looks_like_translation_refusal(text: str) -> bool:
     if not haystack:
         return True
     return any(pattern in haystack for pattern in _TRANSLATION_REFUSAL_PATTERNS)
+
+
+def _count_han_chars(text: str) -> int:
+    return len(re.findall(r"[\u4e00-\u9fff]", text or ""))
+
+
+def _extract_field_value(source_text: str, field_name: str) -> str:
+    for line in (source_text or "").replace("\r", "").splitlines():
+        if line.startswith(f"{field_name}:"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
+def _build_translation_attempts(model_input_text: str, *, chongqing_related: bool) -> list[tuple[str, str, str]]:
+    lines = [line.strip() for line in (model_input_text or "").replace("\r", "").splitlines() if line.strip()]
+
+    def _value_from_line(line: str, default: str = "") -> str:
+        if ":" not in line:
+            return default
+        return line.split(":", 1)[1].strip() or default
+
+    post_url = _value_from_line(lines[0], "") if len(lines) >= 1 else ""
+    created_at = _value_from_line(lines[1], "") if len(lines) >= 6 else ""
+    region = _value_from_line(lines[-5], "ä¸­å›½") if len(lines) >= 5 else "ä¸­å›½"
+    target_scope = _value_from_line(lines[-4], "æœªçŸ¥æœºæž„") if len(lines) >= 4 else "æœªçŸ¥æœºæž„"
+    risk_type = _value_from_line(lines[-3], "ç–‘ä¼¼ä¿¡æ¯å¤–æ³„æˆ–æ•°æ®é£Žé™©") if len(lines) >= 3 else "ç–‘ä¼¼ä¿¡æ¯å¤–æ³„æˆ–æ•°æ®é£Žé™©"
+    priority = "æ˜¯" if chongqing_related else "å¦"
+
+    compact_lines = [
+        f"å…³è”åœ°åŒº: {region}",
+        f"å…³è”å¯¹è±¡: {target_scope}",
+        f"é£Žé™©ç±»åž‹: {risk_type}",
+        f"é‡åº†é‡ç‚¹æç¤º: {priority}",
+    ]
+    minimal_lines = [
+        f"åœ°åŒº: {region}",
+        f"å¯¹è±¡: {target_scope}",
+        "äº‹ä»¶: ç–‘ä¼¼æ•°æ®é£Žé™©",
+        f"é‡ç‚¹å…³æ³¨é‡åº†: {priority}",
+    ]
+    if post_url:
+        compact_lines.insert(0, f"å¸–å­é“¾æŽ¥: {post_url}")
+    if created_at:
+        compact_lines.insert(1 if post_url else 0, f"æ—¶é—´: {created_at}")
+
+    return [
+        ("full", _MONITORING_TRANSLATION_FULL_PROMPT, model_input_text.strip()),
+        ("compact", _MONITORING_TRANSLATION_COMPACT_PROMPT, "\n".join(compact_lines).strip()),
+        ("minimal", _MONITORING_TRANSLATION_MINIMAL_PROMPT, "\n".join(minimal_lines).strip()),
+    ]
+
+
+def _evaluate_translation_result(raw_text: str, cleaned_text: str) -> list[str]:
+    reasons: list[str] = []
+    raw = (raw_text or "").strip()
+    cleaned = (cleaned_text or "").strip()
+    raw_lower = raw.lower()
+    cleaned_lower = cleaned.lower()
+
+    if not raw:
+        reasons.append("æ¨¡åž‹è¿”å›žä¸ºç©º")
+    if _looks_like_translation_refusal(raw) or _looks_like_translation_refusal(cleaned):
+        reasons.append("å‘½ä¸­æ‹’ç­”ç‰¹å¾")
+    if any(pattern in raw_lower or pattern in cleaned_lower for pattern in _TRANSLATION_WARNING_PATTERNS):
+        reasons.append("å‘½ä¸­æ¨¡åž‹è­¦å‘Šç‰¹å¾")
+    echo_hits = sum(1 for marker in _MODEL_PROMPT_ECHO_MARKERS if marker in raw_lower or marker in raw)
+    if echo_hits >= 2:
+        reasons.append("ç–‘ä¼¼å›žæ˜¾æç¤ºè¯")
+    if not cleaned:
+        reasons.append("æ¸…æ´—åŽå†…å®¹ä¸ºç©º")
+
+    han_count = _count_han_chars(cleaned)
+    ascii_alpha_count = len(re.findall(r"[A-Za-z]", cleaned))
+    if han_count < 8:
+        reasons.append("ä¸­æ–‡å†…å®¹è¿‡å°‘")
+    if ascii_alpha_count > max(12, han_count * 2):
+        reasons.append("è‹±æ–‡å æ¯”è¿‡é«˜")
+
+    success_markers = ("ç›‘æŽ§æ¦‚è§ˆ", "å…³è”åœ°åŒº", "å…³è”å¯¹è±¡", "é£Žé™©ç±»åž‹", "é‡ç‚¹æç¤º", "ä¼˜å…ˆå…³æ³¨")
+    if not any(marker in cleaned for marker in success_markers):
+        reasons.append("ç¼ºå°‘ç›‘æŽ§æ¦‚è§ˆå…³é”®å­—æ®µ")
+
+    return reasons
 
 
 def _clean_translated_notification_text(text: str, *, original_title: str, translated_title: str, chongqing_related: bool) -> str:
@@ -518,6 +655,123 @@ def _translate_for_dingtalk(
             f"{('## 重庆相关重点提示\\n该条内容命中了重庆相关关键词，请优先关注。\\n\\n' if chongqing_related and '## 重庆相关重点提示' not in raw_fallback_text else '')}{raw_fallback_text}"
         )
         return fallback_title, fallback_text, err
+
+
+def _build_translation_attempts(model_input_text: str, *, chongqing_related: bool) -> list[tuple[str, str, str]]:
+    lines = [line.strip() for line in (model_input_text or "").replace("\r", "").splitlines() if line.strip()]
+
+    def _value_from_line(line: str, default: str = "") -> str:
+        if ":" not in line:
+            return default
+        return line.split(":", 1)[1].strip() or default
+
+    post_url = _value_from_line(lines[0], "") if len(lines) >= 1 else ""
+    created_at = _value_from_line(lines[1], "") if len(lines) >= 6 else ""
+    region = _value_from_line(lines[-5], "China") if len(lines) >= 5 else "China"
+    target_scope = _value_from_line(lines[-4], "organization") if len(lines) >= 4 else "organization"
+    risk_type = _value_from_line(lines[-3], "suspected data risk") if len(lines) >= 3 else "suspected data risk"
+    priority = "yes" if chongqing_related else "no"
+
+    compact_lines = [
+        f"Region: {region}",
+        f"Target type: {target_scope}",
+        f"Risk type: {risk_type}",
+        f"Chongqing priority: {priority}",
+    ]
+    minimal_lines = [
+        f"Region: {region}",
+        f"Target: {target_scope}",
+        "Event: suspected data risk",
+        f"Priority Chongqing: {priority}",
+    ]
+    if post_url:
+        compact_lines.insert(0, f"Source link: {post_url}")
+    if created_at:
+        compact_lines.insert(1 if post_url else 0, f"Time: {created_at}")
+
+    return [
+        ("full", _MONITORING_TRANSLATION_FULL_PROMPT, model_input_text.strip()),
+        ("compact", _MONITORING_TRANSLATION_COMPACT_PROMPT, "\n".join(compact_lines).strip()),
+        ("minimal", _MONITORING_TRANSLATION_MINIMAL_PROMPT, "\n".join(minimal_lines).strip()),
+    ]
+
+
+def _evaluate_translation_result(raw_text: str, cleaned_text: str) -> list[str]:
+    reasons: list[str] = []
+    raw = (raw_text or "").strip()
+    cleaned = (cleaned_text or "").strip()
+    raw_lower = raw.lower()
+    cleaned_lower = cleaned.lower()
+
+    if not raw:
+        reasons.append("模型返回为空")
+    if _looks_like_translation_refusal(raw) or _looks_like_translation_refusal(cleaned):
+        reasons.append("命中拒答特征")
+    if any(pattern in raw_lower or pattern in cleaned_lower for pattern in _TRANSLATION_WARNING_PATTERNS):
+        reasons.append("命中模型警告特征")
+    echo_hits = sum(1 for marker in _MODEL_PROMPT_ECHO_MARKERS if marker in raw_lower or marker in raw)
+    if echo_hits >= 2:
+        reasons.append("疑似回显提示词")
+    if not cleaned:
+        reasons.append("清洗后内容为空")
+
+    han_count = _count_han_chars(cleaned)
+    ascii_alpha_count = len(re.findall(r"[A-Za-z]", cleaned))
+    if han_count < 8:
+        reasons.append("中文内容过少")
+    if ascii_alpha_count > max(12, han_count * 2):
+        reasons.append("英文占比过高")
+
+    has_structure = "##" in cleaned or "- " in cleaned or "\n" in cleaned
+    if not has_structure and han_count < 20:
+        reasons.append("缺少结构化监控概览")
+
+    return reasons
+
+
+def _translate_for_dingtalk_v2(
+    translator: OpenAICompatTranslator | None,
+    notification_title: str,
+    model_input_text: str,
+    raw_fallback_text: str,
+    *,
+    chongqing_related: bool,
+) -> tuple[str, str, str | None]:
+    send_title = notification_title[:128]
+    send_text = raw_fallback_text
+    if translator is None:
+        if chongqing_related and "重点提示" not in send_text:
+            send_text = "## 重庆相关重点提示\n该条内容命中了重庆相关关键词，请优先关注。\n\n" + send_text
+        return send_title, send_text, None
+
+    attempt_errors: list[str] = []
+    attempts = _build_translation_attempts(model_input_text, chongqing_related=chongqing_related)
+    for idx, (strategy_name, system_prompt, attempt_input) in enumerate(attempts, start=1):
+        print(f"[翻译] 开始策略 {idx}/{len(attempts)}：{strategy_name}，输入长度={len(attempt_input)}")
+        try:
+            translated_text = translator.complete(system_prompt, attempt_input).strip()
+            send_text = _clean_translated_notification_text(
+                translated_text,
+                original_title=notification_title,
+                translated_title=notification_title,
+                chongqing_related=chongqing_related,
+            )
+            failed_reasons = _evaluate_translation_result(translated_text, send_text)
+            if failed_reasons:
+                err = f"策略 {strategy_name} 未通过校验：{'；'.join(failed_reasons)}"
+                print(f"[翻译] {err}")
+                attempt_errors.append(err)
+                continue
+            print(f"[翻译] 策略 {strategy_name} 成功，已通过翻译校验。")
+            return send_title, send_text, None
+        except Exception as e:
+            err = f"策略 {strategy_name} 请求失败：{repr(e)}"
+            print(f"[翻译] {err}")
+            attempt_errors.append(err)
+
+    err = " | ".join(attempt_errors) if attempt_errors else "模型未返回可用翻译结果"
+    fallback_text = raw_fallback_text + "\n\n> 说明: 模型翻译未通过成功校验，已自动回退为本地生成的中文监控概览。"
+    return send_title, fallback_text, err
 
 
 def _deliver_to_feishu(conn, settings: Settings) -> None:
@@ -730,7 +984,7 @@ def _deliver_to_dingtalk(conn, settings: Settings) -> None:
             download_urls=download_urls,
             chongqing_related=chongqing_related,
         )
-        send_title, send_text, translate_error = _translate_for_dingtalk(
+        send_title, send_text, translate_error = _translate_for_dingtalk_v2(
             translator,
             notification_title,
             model_input_text,
