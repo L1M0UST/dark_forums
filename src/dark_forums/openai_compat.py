@@ -102,8 +102,44 @@ class OpenAICompatTranslator:
             raise RuntimeError(f"模型返回内容为空：{data}")
         return content.strip()
 
+    def _requests_proxies(self) -> dict[str, str] | None:
+        if not self._cfg.proxy_server:
+            return None
+        return {
+            "http": self._cfg.proxy_server,
+            "https": self._cfg.proxy_server,
+        }
+
     def complete(self, system_prompt: str, user_prompt: str) -> str:
         return self._post_chat(system_prompt, user_prompt)
+
+    def translate_text_to_zh_via_google(self, text: str) -> str:
+        query = (text or "").strip()
+        if not query:
+            return ""
+        url = "https://translate.googleapis.com/translate_a/single"
+        resp = requests.get(
+            url,
+            params={
+                "client": "gtx",
+                "sl": "auto",
+                "tl": "zh-CN",
+                "dt": "t",
+                "q": query,
+            },
+            timeout=30,
+            proxies=self._requests_proxies(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        try:
+            translated = "".join(part[0] for part in data[0] if isinstance(part, list) and part and part[0])
+        except Exception as exc:
+            raise RuntimeError(f"Google 翻译返回格式异常：{data}") from exc
+        translated = self._strip_think_blocks(translated)
+        if not translated.strip():
+            raise RuntimeError(f"Google 翻译返回内容为空：{data}")
+        return translated.strip()
 
     def translate_title_to_zh(self, title: str) -> str:
         return self._post_chat(

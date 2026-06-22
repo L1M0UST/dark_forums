@@ -8,6 +8,7 @@ from pathlib import Path
 from .config import Settings, load_settings
 from .dingtalk import DingTalkClient, DingTalkConfig
 from .openai_compat import OpenAICompatConfig, OpenAICompatTranslator
+from .runner import _build_notification_title, _translate_dingtalk_message_v3
 
 
 class _LineTee:
@@ -635,7 +636,7 @@ def run_test_notify(project_root: Path) -> int:
         try:
             print(f"[测试] 开始执行翻译与钉钉联调测试，日志文件：{log_path}")
             _validate_test_settings(settings)
-            _run_test_notify_inner(settings)
+            _run_test_notify_inner_v3(settings)
             print("[测试] 翻译与钉钉联调测试完成。")
             return 0
         except Exception as e:
@@ -662,6 +663,66 @@ def _validate_test_settings(settings: Settings) -> None:
         raise RuntimeError("OPENAI_COMPAT_API_KEY 为空，无法测试翻译模型。")
     if not settings.llm_model.strip():
         raise RuntimeError("OPENAI_COMPAT_MODEL 为空，无法测试翻译模型。")
+
+
+def _run_test_notify_inner_v3(settings: Settings) -> None:
+    translator = OpenAICompatTranslator(
+        OpenAICompatConfig(
+            base_url=settings.llm_base_url,
+            api_key=settings.llm_api_key,
+            model=settings.llm_model,
+            proxy_server=(settings.llm_proxy_server if settings.llm_use_proxy else ""),
+        )
+    )
+    client = DingTalkClient(
+        DingTalkConfig(
+            webhook=settings.dingtalk_webhook,
+            secret=(settings.dingtalk_secret or None),
+        )
+    )
+
+    (
+        title,
+        post_url,
+        created_at,
+        author_name,
+        first_post_text,
+        download_urls,
+        chongqing_related,
+    ) = _build_test_payload()
+
+    notification_title = _build_notification_title(
+        title=title,
+        first_post_text=first_post_text,
+        chongqing_related=chongqing_related,
+    )
+
+    print(
+        f"[测试] 翻译模型配置：base_url={settings.llm_base_url} model={settings.llm_model} "
+        f"use_proxy={settings.llm_use_proxy} proxy={settings.llm_proxy_server or '(empty)'}"
+    )
+    print(f"[测试] 步骤 1/2：开始测试拆分组件翻译，通知标题将使用本地安全标题：{notification_title}")
+    send_title, send_text, translate_error = _translate_dingtalk_message_v3(
+        translator,
+        notification_title=notification_title,
+        post_url=post_url,
+        title=title,
+        created_at=created_at,
+        author_name=author_name,
+        first_post_text=first_post_text,
+        chongqing_related=chongqing_related,
+    )
+    if translate_error:
+        print(f"[测试] 翻译存在回退说明：{translate_error}")
+    else:
+        print(f"[测试] 翻译成功，标题={send_title}")
+    print(f"[测试] 发送正文预览（前 800 字）：{send_text[:800]}")
+
+    print("[测试] 步骤 2/2：开始测试钉钉 markdown 发送。")
+    resp = client.send_markdown(title=send_title, text=send_text)
+    print(f"[测试] 钉钉发送成功，响应={resp}")
+    if translate_error:
+        raise RuntimeError(f"翻译测试存在回退，但钉钉发送成功：{translate_error}")
 
 
 def _run_test_notify_inner(settings: Settings) -> None:

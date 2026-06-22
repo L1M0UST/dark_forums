@@ -774,6 +774,326 @@ def _translate_for_dingtalk_v2(
     return send_title, fallback_text, err
 
 
+def _prepare_post_content_for_translation_v3(first_post_text: str, *, max_chars: int = 1800) -> str:
+    text = (first_post_text or "").replace("\r", "").strip()
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip() + "..."
+    return text
+
+
+def _reduce_post_content_for_retry_v3(first_post_text: str, *, max_chars: int = 1200) -> str:
+    text = (first_post_text or "").replace("\r", "").strip()
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+    if not paragraphs:
+        return _prepare_post_content_for_translation_v3(first_post_text, max_chars=max_chars)
+    if len(paragraphs) == 1:
+        reduced = paragraphs[0]
+    else:
+        reduced = paragraphs[0]
+        if paragraphs[-1] != paragraphs[0]:
+            reduced = reduced + "\n\n" + paragraphs[-1]
+    reduced = re.sub(r"\n{3,}", "\n\n", reduced)
+    if len(reduced) > max_chars:
+        reduced = reduced[:max_chars].rstrip() + "..."
+    return reduced
+
+
+def _looks_like_failed_component_translation_v3(
+    translated_text: str,
+    *,
+    original_text: str,
+    component_name: str,
+) -> list[str]:
+    reasons: list[str] = []
+    raw = (translated_text or "").strip()
+    raw_lower = raw.lower()
+    original = (original_text or "").strip()
+    original_lower = original.lower()
+
+    if not raw:
+        reasons.append(f"{component_name}返回为空")
+        return reasons
+    if _looks_like_translation_refusal(raw):
+        reasons.append(f"{component_name}命中拒答特征")
+    if any(pattern in raw_lower for pattern in _TRANSLATION_WARNING_PATTERNS):
+        reasons.append(f"{component_name}命中模型警告特征")
+    if sum(1 for marker in _MODEL_PROMPT_ECHO_MARKERS if marker in raw_lower or marker in raw) >= 2:
+        reasons.append(f"{component_name}疑似回显提示词")
+
+    han_count = _count_han_chars(raw)
+    ascii_alpha_count = len(re.findall(r"[A-Za-z]", raw))
+    if component_name == "标题":
+        if han_count < 2 and _count_han_chars(original) < 2:
+            reasons.append("标题中文内容过少")
+        if raw_lower == original_lower and _count_han_chars(original) < 2:
+            reasons.append("标题疑似未翻译")
+    else:
+        if han_count < 10:
+            reasons.append("正文中文内容过少")
+        if raw_lower == original_lower and _count_han_chars(original) < 10:
+            reasons.append("正文疑似未翻译")
+        if ascii_alpha_count > max(24, han_count * 2):
+            reasons.append("正文英文占比过高")
+    return reasons
+
+
+def _translate_title_component_v3(
+    translator: OpenAICompatTranslator | None,
+    title: str,
+) -> tuple[str, str | None]:
+    original_title = (title or "").strip()
+    if not original_title:
+        return "", "标题为空"
+    if translator is None:
+        return original_title, "未配置大模型，标题直接使用原文"
+
+    system_prompt = (
+        "Translate the forum post title into natural Simplified Chinese for internal security monitoring. "
+        "Preserve proper nouns, malware family names, actor names, organization names, product names, CVE IDs, counts, URLs, and technical abbreviations. "
+        "Use natural Chinese wording and do not translate too literally. Output only the translated title."
+    )
+
+    attempt_errors: list[str] = []
+    try:
+        translated = translator.complete(system_prompt, original_title).strip()
+        failed_reasons = _looks_like_failed_component_translation_v3(
+            translated,
+            original_text=original_title,
+            component_name="标题",
+        )
+        if not failed_reasons:
+            print("[翻译][标题] LLM 翻译成功。")
+            return translated, None
+        err = "；".join(failed_reasons)
+        print(f"[翻译][标题] LLM 翻译未通过校验：{err}")
+        attempt_errors.append(f"llm={err}")
+    except Exception as e:
+        err = repr(e)
+        print(f"[翻译][标题] LLM 翻译失败：{err}")
+        attempt_errors.append(f"llm={err}")
+
+    try:
+        translated = translator.translate_text_to_zh_via_google(original_title).strip()
+        failed_reasons = _looks_like_failed_component_translation_v3(
+            translated,
+            original_text=original_title,
+            component_name="标题",
+        )
+        if not failed_reasons:
+            print("[翻译][标题] Google 风格回退翻译成功。")
+            return translated, "标题已使用 Google 风格回退翻译"
+        err = "；".join(failed_reasons)
+        print(f"[翻译][标题] Google 风格回退未通过校验：{err}")
+        attempt_errors.append(f"google={err}")
+    except Exception as e:
+        err = repr(e)
+        print(f"[翻译][标题] Google 风格回退失败：{err}")
+        attempt_errors.append(f"google={err}")
+
+    return original_title, "标题翻译失败，已回退原文：" + " | ".join(attempt_errors)
+
+
+def _translate_content_component_v3(
+    translator: OpenAICompatTranslator | None,
+    first_post_text: str,
+) -> tuple[str, str | None]:
+    original_content = _prepare_post_content_for_translation_v3(first_post_text)
+    if not original_content:
+        return "未抓取到可用正文内容。", "正文为空"
+    if translator is None:
+        return original_content, "未配置大模型，正文直接使用原文"
+
+    system_prompt = (
+        "Translate the forum post content into natural Simplified Chinese for internal monitoring. "
+        "Preserve proper nouns, organization names, product names, malware family names, actor names, URLs, IDs, and technical abbreviations. "
+        "Keep paragraph structure. Output only the translated content without commentary."
+    )
+    reduced_content = _reduce_post_content_for_retry_v3(first_post_text)
+    attempt_plan = [
+        ("llm_full", original_content),
+        ("llm_first_last", reduced_content),
+    ]
+    attempt_errors: list[str] = []
+    last_source_text = original_content
+
+    for strategy_name, source_text in attempt_plan:
+        last_source_text = source_text
+        try:
+            translated = translator.complete(system_prompt, source_text).strip()
+            failed_reasons = _looks_like_failed_component_translation_v3(
+                translated,
+                original_text=source_text,
+                component_name="正文",
+            )
+            if not failed_reasons:
+                print(f"[翻译][正文] {strategy_name} 成功。")
+                return translated, (None if strategy_name == "llm_full" else "正文已使用缩减内容重试翻译")
+            err = "；".join(failed_reasons)
+            print(f"[翻译][正文] {strategy_name} 未通过校验：{err}")
+            attempt_errors.append(f"{strategy_name}={err}")
+        except Exception as e:
+            err = repr(e)
+            print(f"[翻译][正文] {strategy_name} 失败：{err}")
+            attempt_errors.append(f"{strategy_name}={err}")
+
+    try:
+        translated = translator.translate_text_to_zh_via_google(last_source_text).strip()
+        failed_reasons = _looks_like_failed_component_translation_v3(
+            translated,
+            original_text=last_source_text,
+            component_name="正文",
+        )
+        if not failed_reasons:
+            print("[翻译][正文] Google 风格回退翻译成功。")
+            return translated, "正文已使用 Google 风格回退翻译"
+        err = "；".join(failed_reasons)
+        print(f"[翻译][正文] Google 风格回退未通过校验：{err}")
+        attempt_errors.append(f"google={err}")
+    except Exception as e:
+        err = repr(e)
+        print(f"[翻译][正文] Google 风格回退失败：{err}")
+        attempt_errors.append(f"google={err}")
+
+    return original_content, "正文翻译失败，已回退原文：" + " | ".join(attempt_errors)
+
+
+def _build_overview_values_local_v3(
+    *,
+    post_url: str,
+    created_at: str,
+    title: str,
+    first_post_text: str,
+    chongqing_related: bool,
+) -> dict[str, str]:
+    regions = "、".join(_extract_region_labels(title, first_post_text))
+    target_scope = _infer_target_scope(title, first_post_text)
+    source_value = f"[原帖链接]({post_url})"
+    if created_at:
+        source_value = f"{source_value}，时间：{created_at}"
+    return {
+        "区域": regions,
+        "关注对象": target_scope,
+        "风险概述": "疑似信息外泄或数据风险",
+        "信息来源": source_value,
+        "重点提示": ("该条内容命中了重庆相关关键词，请优先关注。" if chongqing_related else "该条内容与中国相关，请持续关注。"),
+    }
+
+
+def _translate_overview_component_v3(
+    translator: OpenAICompatTranslator | None,
+    *,
+    post_url: str,
+    created_at: str,
+    title: str,
+    first_post_text: str,
+    chongqing_related: bool,
+) -> tuple[dict[str, str], str | None]:
+    local_values = _build_overview_values_local_v3(
+        post_url=post_url,
+        created_at=created_at,
+        title=title,
+        first_post_text=first_post_text,
+        chongqing_related=chongqing_related,
+    )
+    if translator is None:
+        return local_values, "未配置大模型，监控概览使用本地模板"
+
+    prompt = (
+        "Using the provided safe monitoring fields, return concise Simplified Chinese values for exactly five fields. "
+        "Preserve proper nouns and geographic names accurately. Output exactly these five lines and nothing else:\n"
+        "区域: ...\n关注对象: ...\n风险概述: ...\n信息来源: ...\n重点提示: ..."
+    )
+    user_input = "\n".join([
+        f"Region: {local_values['区域']}",
+        f"Target type: {local_values['关注对象']}",
+        f"Risk summary: {local_values['风险概述']}",
+        f"Source: {post_url}",
+        f"Publish time: {created_at or 'unknown'}",
+        f"Priority hint: {local_values['重点提示']}",
+    ])
+    try:
+        translated = translator.complete(prompt, user_input).strip()
+        parsed: dict[str, str] = {}
+        for line in translated.replace("\r", "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            normalized = line.replace("：", ":", 1)
+            if ":" not in normalized:
+                continue
+            key, value = normalized.split(":", 1)
+            parsed[key.strip()] = value.strip()
+        required_keys = ("区域", "关注对象", "风险概述", "信息来源", "重点提示")
+        if all(parsed.get(key) for key in required_keys) and not _looks_like_translation_refusal(translated):
+            print("[翻译][概览] LLM 填充成功。")
+            return {key: parsed[key] for key in required_keys}, None
+        print("[翻译][概览] LLM 填充未通过校验，回退本地模板。")
+        return local_values, "监控概览翻译失败，已回退本地模板"
+    except Exception as e:
+        print(f"[翻译][概览] LLM 填充失败：{repr(e)}")
+        return local_values, f"监控概览翻译失败，已回退本地模板：{repr(e)}"
+
+
+def _build_unified_dingtalk_message_v3(
+    *,
+    translated_post_title: str,
+    translated_post_content: str,
+    overview_values: dict[str, str],
+) -> str:
+    parts = [
+        "## 帖子标题",
+        translated_post_title.strip() or "未获取到标题翻译。",
+        "",
+        "## 帖子内容",
+        translated_post_content.strip() or "未获取到正文翻译。",
+        "",
+        "## 监控概览",
+        f"- 区域: {overview_values.get('区域', '')}",
+        f"- 关注对象: {overview_values.get('关注对象', '')}",
+        f"- 风险概述: {overview_values.get('风险概述', '')}",
+        f"- 信息来源: {overview_values.get('信息来源', '')}",
+        f"- 重点提示: {overview_values.get('重点提示', '')}",
+    ]
+    return "\n".join(parts).strip()
+
+
+def _translate_dingtalk_message_v3(
+    translator: OpenAICompatTranslator | None,
+    *,
+    notification_title: str,
+    post_url: str,
+    title: str,
+    created_at: str,
+    author_name: str,
+    first_post_text: str,
+    chongqing_related: bool,
+) -> tuple[str, str, str | None]:
+    translated_title, title_note = _translate_title_component_v3(translator, title)
+    translated_content, content_note = _translate_content_component_v3(translator, first_post_text)
+    overview_values, overview_note = _translate_overview_component_v3(
+        translator,
+        post_url=post_url,
+        created_at=created_at,
+        title=title,
+        first_post_text=first_post_text,
+        chongqing_related=chongqing_related,
+    )
+
+    send_text = _build_unified_dingtalk_message_v3(
+        translated_post_title=translated_title,
+        translated_post_content=translated_content,
+        overview_values=overview_values,
+    )
+
+    notes = [note for note in (title_note, content_note, overview_note) if note]
+    if notes:
+        send_text += "\n\n> 说明: " + "；".join(notes)
+        return notification_title[:128], send_text, "；".join(notes)
+    return notification_title[:128], send_text, None
+
+
 def _deliver_to_feishu(conn, settings: Settings) -> None:
     if not settings.feishu_enabled:
         return
@@ -966,29 +1286,14 @@ def _deliver_to_dingtalk(conn, settings: Settings) -> None:
             first_post_text=first_post_text,
             chongqing_related=chongqing_related,
         )
-        raw_text = _build_dingtalk_raw_markdown(
-            post_url=post_url,
-            title=title,
-            created_at=created_at,
-            author_name=author_name,
-            first_post_text=first_post_text,
-            download_urls=download_urls,
-            chongqing_related=chongqing_related,
-        )
-        model_input_text = _build_translation_input(
-            post_url=post_url,
-            title=title,
-            created_at=created_at,
-            author_name=author_name,
-            first_post_text=first_post_text,
-            download_urls=download_urls,
-            chongqing_related=chongqing_related,
-        )
-        send_title, send_text, translate_error = _translate_for_dingtalk_v2(
+        send_title, send_text, translate_error = _translate_dingtalk_message_v3(
             translator,
-            notification_title,
-            model_input_text,
-            raw_text,
+            notification_title=notification_title,
+            post_url=post_url,
+            title=title,
+            created_at=created_at,
+            author_name=author_name,
+            first_post_text=first_post_text,
             chongqing_related=chongqing_related,
         )
         if translate_error:
